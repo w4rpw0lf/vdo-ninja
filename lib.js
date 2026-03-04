@@ -12246,7 +12246,7 @@ function applyEffects(track) {
 		session.canvas.width = 2 * parseInt(session.canvasSource.width / 2);
 
 		setupOscillator(drawFrameMirrored, track.getSettings().frameRate || 30);
-	} else if (session.effect == "3" || session.effect == "4" || session.effect == "5") {
+	} else if (session.effect == "3" || session.effect == "4" || session.effect == "5" || session.effect == "16") {
 		// blur & greenscreen (low and high)
 		setupCanvas();
 		session.canvasSource.srcObject.addTrack(track);
@@ -12796,7 +12796,274 @@ function initEffectsImage() {
 }
 
 var LaunchTFWorkerCallback = false;
+function shouldUseFrameLockedSegmentation() {
+	try {
+		if (typeof urlParams !== "undefined") {
+			if (urlParams.has("fastmask")) {
+				return false;
+			}
+			if (urlParams.has("accuratemask")) {
+				return true;
+			}
+		}
+		var qualityTier = typeof session.quality_wb === "number" ? session.quality_wb : judgePerformance();
+		if (qualityTier >= 2) {
+			return false;
+		}
+		if (session.mobile) {
+			return qualityTier === 0;
+		}
+		return true;
+	} catch (e) {
+		return !session.mobile;
+	}
+}
+function MediaPipeSelfieWorker() {
+	if (!session.mediaPipeSelfieSegmenter || !session.mediaPipeSelfieSegmenter.ready || !session.mediaPipeSelfieSegmenter.segmenter) {
+		return;
+	}
+	const segmenterState = session.mediaPipeSelfieSegmenter;
+	initEffectsImage();
+	const segmentationWidth = 256;
+	const segmentationHeight = 144;
+	const segmentationPixelCount = segmentationWidth * segmentationHeight;
+	const segmentationInputCanvas = document.createElement("canvas");
+	segmentationInputCanvas.width = segmentationWidth;
+	segmentationInputCanvas.height = segmentationHeight;
+	const segmentationInputCtx = segmentationInputCanvas.getContext("2d", { alpha: false, willReadFrequently: true });
+	const segmentationMask = new ImageData(segmentationWidth, segmentationHeight);
+	const segmentationMaskCanvas = document.createElement("canvas");
+	segmentationMaskCanvas.width = segmentationWidth;
+	segmentationMaskCanvas.height = segmentationHeight;
+	const segmentationMaskCtx = segmentationMaskCanvas.getContext("2d", { alpha: true, willReadFrequently: true });
+	const sourceFrameCanvas = document.createElement("canvas");
+	sourceFrameCanvas.width = session.canvasSource.width;
+	sourceFrameCanvas.height = session.canvasSource.height;
+	const sourceFrameCtx = sourceFrameCanvas.getContext("2d", { alpha: false });
+	segmenterState.nowTime = new Date().getTime();
+	segmenterState.offsetTime = 0;
+	var slow = 0;
+	var slower = false;
+	var screenWidth = window.innerWidth;
+
+	function refineMask(maskData, colorData, width, height) {
+		var pixelCount = width * height;
+		var alphaIn = new Uint8Array(pixelCount);
+		for (var i = 0; i < pixelCount; i++) {
+			alphaIn[i] = maskData[i * 4 + 3];
+		}
+		var sigmaColorSq = 900;
+		for (var y = 1; y < height - 1; y++) {
+			for (var x = 1; x < width - 1; x++) {
+				var idx = y * width + x;
+				var alpha = alphaIn[idx];
+				if (alpha < 5 || alpha > 250) continue;
+				var ci = idx * 4;
+				var cr = colorData[ci];
+				var cg = colorData[ci + 1];
+				var cb = colorData[ci + 2];
+				var weightedSum = 0;
+				var weightSum = 0;
+				for (var dy = -1; dy <= 1; dy++) {
+					for (var dx = -1; dx <= 1; dx++) {
+						var ni = (y + dy) * width + (x + dx);
+						var nci = ni * 4;
+						var dr = colorData[nci] - cr;
+						var dg = colorData[nci + 1] - cg;
+						var db = colorData[nci + 2] - cb;
+						var colorDistSq = dr * dr + dg * dg + db * db;
+						var weight = sigmaColorSq / (sigmaColorSq + colorDistSq);
+						weightedSum += alphaIn[ni] * weight;
+						weightSum += weight;
+					}
+				}
+				maskData[idx * 4 + 3] = (weightedSum / weightSum) | 0;
+			}
+		}
+	}
+
+	async function process() {
+		if (!(session.effect == "3" || session.effect == "4" || session.effect == "5" || session.effect == "16")) {
+			return;
+		}
+		if (segmenterState.activelyProcessing) {
+			return;
+		}
+		segmenterState.activelyProcessing = true;
+
+		if (session.mobile) {
+			if (screenWidth !== window.innerWidth) {
+				screenWidth = window.innerWidth;
+				segmenterState.activelyProcessing = false;
+				setTimeout(function () {
+					updateRenderOutpipe();
+				}, 200);
+				return;
+			}
+		}
+
+		try {
+			let frameSource = session.canvasSource;
+			const frameLocked = shouldUseFrameLockedSegmentation() && !slower && !!sourceFrameCtx;
+			if (frameLocked) {
+				if (sourceFrameCanvas.width !== session.canvasSource.width || sourceFrameCanvas.height !== session.canvasSource.height) {
+					sourceFrameCanvas.width = session.canvasSource.width;
+					sourceFrameCanvas.height = session.canvasSource.height;
+				}
+				sourceFrameCtx.drawImage(session.canvasSource, 0, 0, sourceFrameCanvas.width, sourceFrameCanvas.height);
+				frameSource = sourceFrameCanvas;
+			}
+			segmentationInputCtx.drawImage(
+				frameSource,
+				0,
+				0,
+				session.canvasSource.width,
+				session.canvasSource.height,
+				0,
+				0,
+				segmentationWidth,
+				segmentationHeight
+			);
+			const imageData = segmentationInputCtx.getImageData(0, 0, segmentationWidth, segmentationHeight);
+			const results = segmenterState.segmenter.segmentForVideo(segmentationInputCanvas, performance.now());
+			let alphaMask = null;
+			let categoryMask = null;
+			if (results && results.confidenceMasks && results.confidenceMasks.length) {
+				let personMaskIndex = segmenterState.personMaskIndex || 0;
+				if (personMaskIndex >= results.confidenceMasks.length) {
+					personMaskIndex = results.confidenceMasks.length - 1;
+				}
+				alphaMask = results.confidenceMasks[personMaskIndex].getAsFloat32Array();
+			} else if (results && results.categoryMask) {
+				categoryMask = results.categoryMask.getAsUint8Array();
+			}
+			if (!alphaMask && !categoryMask) {
+				if (results && results.close) {
+					results.close();
+				}
+				segmenterState.activelyProcessing = false;
+				return;
+			}
+			for (let i = 0; i < segmentationPixelCount; i++) {
+				let alpha = 0;
+				if (alphaMask) {
+					alpha = Math.min(Math.pow(255 * alphaMask[i], 1.5) - 10, 255);
+				} else if (categoryMask) {
+					alpha = categoryMask[i] ? 255 : 0;
+				}
+				segmentationMask.data[i * 4 + 3] = alpha;
+			}
+			refineMask(segmentationMask.data, imageData.data, segmentationWidth, segmentationHeight);
+			segmentationMaskCtx.putImageData(segmentationMask, 0, 0);
+			if (results && results.close) {
+				results.close();
+			}
+
+			session.canvasCtx.globalCompositeOperation = "copy";
+			if ((session.mobile && !session.flagship) || slower) {
+				session.canvasCtx.filter = "blur(3px)";
+			} else {
+				session.canvasCtx.filter = "blur(5px)";
+			}
+			session.canvasCtx.drawImage(segmentationMaskCanvas, 0, 0, segmentationWidth, segmentationHeight, 0, 0, session.canvasSource.width, session.canvasSource.height);
+			session.canvasCtx.globalCompositeOperation = "source-in";
+			session.canvasCtx.filter = "none";
+			session.canvasCtx.drawImage(frameSource, 0, 0);
+			session.canvasCtx.globalCompositeOperation = "destination-over";
+
+			if (session.effect == "4") {
+				session.canvasCtx.filter = "none";
+				session.canvasCtx.fillStyle = "#0F0";
+				session.canvasCtx.fillRect(0, 0, session.canvas.width, session.canvas.height);
+			} else if (session.effect == "16") {
+				session.canvasCtx.filter = "none";
+			} else if (session.effect == "5") {
+				session.canvasCtx.filter = "none";
+				if (session.effectsImage.complete) {
+					try {
+						session.canvasCtx.drawImage(session.effectsImage, 0, 0, session.canvas.width, session.canvas.height);
+					} catch (e) { }
+				}
+			} else if (session.effect == "3") {
+				if (session.effectValue) {
+					session.canvasCtx.filter = "blur(" + parseInt(session.effectValue) * 2 + "px)";
+				} else {
+					session.canvasCtx.filter = "blur(4px)";
+				}
+				session.canvasCtx.drawImage(frameSource, 0, 0);
+				session.canvasCtx.filter = "none";
+			}
+		} catch (e) {
+			errorlog(e);
+			segmenterState.errorCount = (segmenterState.errorCount || 0) + 1;
+			if (segmenterState.errorCount >= 5 && !segmenterState.fallbackTriggered) {
+				segmenterState.fallbackTriggered = true;
+				try {
+					if (segmenterState.segmenter && segmenterState.segmenter.close) {
+						segmenterState.segmenter.close();
+					}
+				} catch (ignore) { }
+				segmenterState.ready = false;
+				segmenterState.failed = true;
+				segmenterState.segmenter = null;
+				attemptTFLiteJsFileLoad();
+				setTimeout(function () {
+					updateRenderOutpipe();
+				}, 0);
+			}
+			segmenterState.activelyProcessing = false;
+			return;
+		}
+
+		segmenterState.lastTime = segmenterState.nowTime;
+		segmenterState.nowTime = new Date().getTime();
+		var time = 30 - (segmenterState.nowTime - segmenterState.lastTime || 0);
+		time = time + (segmenterState.offsetTime || 0);
+		segmenterState.activelyProcessing = false;
+		slow -= 1;
+		if (time <= 0) {
+			if (time < -40) {
+				slow += 1;
+				if (slow > 100) {
+					slower = true;
+				}
+			}
+			segmenterState.offsetTime = 0;
+		} else {
+			slow -= 2;
+			segmenterState.offsetTime = time || 0;
+		}
+	}
+
+	try {
+		segmenterState.stopOscillator = setupOscillator(process, session.canvasSource.srcObject.getVideoTracks()[0].getSettings().frameRate || 30);
+	} catch (e) {
+		errorlog(e);
+		segmenterState.stopOscillator = setupOscillator(process, 30);
+	}
+}
 function TFLiteWorker() {
+	if (session.mediaPipeSelfieSegmenter && session.mediaPipeSelfieSegmenter.ready && session.mediaPipeSelfieSegmenter.segmenter) {
+		LaunchTFWorkerCallback = false;
+		log("MediaPipeSelfieWorker() called");
+		MediaPipeSelfieWorker();
+		return;
+	}
+	if (
+		shouldUseMediaPipeSelfieSegmenter() &&
+		(!session.mediaPipeSelfieSegmenter || (!session.mediaPipeSelfieSegmenter.ready && !session.mediaPipeSelfieSegmenter.failed))
+	) {
+		LaunchTFWorkerCallback = true;
+		attemptMediaPipeSelfieSegmenterLoad();
+		if (session.tfliteModule == false || TFLITELOADING) {
+			return;
+		}
+	}
+	if (session.mediaPipeSelfieSegmenter && session.mediaPipeSelfieSegmenter.failed && session.tfliteModule == false) {
+		attemptTFLiteJsFileLoad();
+		LaunchTFWorkerCallback = true;
+		return;
+	}
 	if (session.tfliteModule == false) {
 		LaunchTFWorkerCallback = true;
 		return;
@@ -12821,6 +13088,10 @@ function TFLiteWorker() {
 	segmentationMaskCanvas.width = segmentationWidth;
 	segmentationMaskCanvas.height = segmentationHeight;
 	const segmentationMaskCtx = segmentationMaskCanvas.getContext("2d", { alpha: true, willReadFrequently: true });
+	const sourceFrameCanvas = document.createElement("canvas");
+	sourceFrameCanvas.width = session.canvasSource.width;
+	sourceFrameCanvas.height = session.canvasSource.height;
+	const sourceFrameCtx = sourceFrameCanvas.getContext("2d", { alpha: false });
 	session.tfliteModule.nowTime = new Date().getTime();
 	session.tfliteModule.offsetTime = 0;
 
@@ -12868,7 +13139,7 @@ function TFLiteWorker() {
 	}
 
 	async function process() {
-		if (!(session.effect == "3" || session.effect == "4" || session.effect == "5")) {
+		if (!(session.effect == "3" || session.effect == "4" || session.effect == "5" || session.effect == "16")) {
 			//session.tfliteModule.looping=false;
 			errorlog("shouldn't happen");
 			return;
@@ -12894,8 +13165,18 @@ function TFLiteWorker() {
 		}
 
 		try {
+			let frameSource = session.canvasSource;
+			const frameLocked = shouldUseFrameLockedSegmentation() && !slower && !!sourceFrameCtx;
+			if (frameLocked) {
+				if (sourceFrameCanvas.width !== session.canvasSource.width || sourceFrameCanvas.height !== session.canvasSource.height) {
+					sourceFrameCanvas.width = session.canvasSource.width;
+					sourceFrameCanvas.height = session.canvasSource.height;
+				}
+				sourceFrameCtx.drawImage(session.canvasSource, 0, 0, sourceFrameCanvas.width, sourceFrameCanvas.height);
+				frameSource = sourceFrameCanvas;
+			}
 			segmentationMaskCtx.filter = "none";
-			segmentationMaskCtx.drawImage(session.canvasSource, 0, 0, session.canvasSource.width, session.canvasSource.height, 0, 0, segmentationWidth, segmentationHeight);
+			segmentationMaskCtx.drawImage(frameSource, 0, 0, session.canvasSource.width, session.canvasSource.height, 0, 0, segmentationWidth, segmentationHeight);
 
 			const imageData = segmentationMaskCtx.getImageData(0, 0, segmentationWidth, segmentationHeight);
 
@@ -12928,7 +13209,7 @@ function TFLiteWorker() {
 
 			session.canvasCtx.globalCompositeOperation = "source-in";
 			session.canvasCtx.filter = "none";
-			session.canvasCtx.drawImage(session.canvasSource, 0, 0);
+			session.canvasCtx.drawImage(frameSource, 0, 0);
 
 			session.canvasCtx.globalCompositeOperation = "destination-over";
 
@@ -12937,6 +13218,8 @@ function TFLiteWorker() {
 				session.canvasCtx.filter = "none";
 				session.canvasCtx.fillStyle = "#0F0";
 				session.canvasCtx.fillRect(0, 0, session.canvas.width, session.canvas.height);
+			} else if (session.effect == "16") {
+				session.canvasCtx.filter = "none";
 			} else if (session.effect == "5") {
 				session.canvasCtx.filter = "none";
 				if (session.effectsImage.complete) {
@@ -12951,7 +13234,7 @@ function TFLiteWorker() {
 				} else {
 					session.canvasCtx.filter = "blur(4px)"; // Does not work on Safari
 				}
-				session.canvasCtx.drawImage(session.canvasSource, 0, 0);
+				session.canvasCtx.drawImage(frameSource, 0, 0);
 				session.canvasCtx.filter = "none";
 			} else {
 				session.tfliteModule.activelyProcessing = false;
@@ -12990,7 +13273,7 @@ function TFLiteWorker() {
 	}
 
 	async function processiOS() {
-		if (!(session.effect == "3" || session.effect == "4" || session.effect == "5")) {
+		if (!(session.effect == "3" || session.effect == "4" || session.effect == "5" || session.effect == "16")) {
 			errorlog("shouldn't happen");
 			//session.tfliteModule.looping=false;
 			return;
@@ -13011,7 +13294,17 @@ function TFLiteWorker() {
 		}
 
 		try {
-			segmentationMaskCtx.drawImage(session.canvasSource, 0, 0, session.canvasSource.width, session.canvasSource.height, 0, 0, segmentationWidth, segmentationHeight);
+			let frameSource = session.canvasSource;
+			const frameLocked = shouldUseFrameLockedSegmentation() && !slower && !!sourceFrameCtx;
+			if (frameLocked) {
+				if (sourceFrameCanvas.width !== session.canvasSource.width || sourceFrameCanvas.height !== session.canvasSource.height) {
+					sourceFrameCanvas.width = session.canvasSource.width;
+					sourceFrameCanvas.height = session.canvasSource.height;
+				}
+				sourceFrameCtx.drawImage(session.canvasSource, 0, 0, sourceFrameCanvas.width, sourceFrameCanvas.height);
+				frameSource = sourceFrameCanvas;
+			}
+			segmentationMaskCtx.drawImage(frameSource, 0, 0, session.canvasSource.width, session.canvasSource.height, 0, 0, segmentationWidth, segmentationHeight);
 
 			var imageData = segmentationMaskCtx.getImageData(0, 0, segmentationWidth, segmentationHeight);
 
@@ -13033,7 +13326,7 @@ function TFLiteWorker() {
 			segmentationMaskCtx.putImageData(segmentationMask, 0, 0);
 
 			session.canvasCtx.globalCompositeOperation = "copy";
-			session.canvasCtx.drawImage(session.canvasSource, 0, 0);
+			session.canvasCtx.drawImage(frameSource, 0, 0);
 
 			session.canvasCtx.globalCompositeOperation = "destination-out";
 			session.canvasCtx.drawImage(segmentationMaskCanvas, 0, 0, segmentationWidth, segmentationHeight, 0, 0, session.canvasSource.width, session.canvasSource.height);
@@ -13044,6 +13337,8 @@ function TFLiteWorker() {
 				// greenscreen
 				session.canvasCtx.fillStyle = "#0F0";
 				session.canvasCtx.fillRect(0, 0, session.canvas.width, session.canvas.height);
+			} else if (session.effect == "16") {
+				session.canvasCtx.filter = "none";
 			} else if (session.effect == "5") {
 				if (session.effectsImage.complete) {
 					try {
@@ -13055,7 +13350,7 @@ function TFLiteWorker() {
 
 				const width = canvasBG.width;
 				const height = canvasBG.height;
-				ctxBG.drawImage(session.canvasSource, 0, 0, width, height);
+				ctxBG.drawImage(frameSource, 0, 0, width, height);
 				imageData = ctxBG.getImageData(0, 0, width, height);
 
 				const { data } = imageData;
@@ -26530,7 +26825,31 @@ async function createRoom(roomname = false, reload = false) {
 		session.claimRoomCap = false;
 	}
 	session.claimBypassKey = sanitizePassword(session.claimBypassKey || "") || false;
-	session.requireServerApproval = false;
+	session.requireServerApproval = session.requireServerApproval === true;
+	try {
+		var roomApprovalToggle = getById("requireApprovalForRoom");
+		if (roomApprovalToggle) {
+			session.requireServerApproval = !!roomApprovalToggle.checked;
+		}
+		if (session.requireServerApproval) {
+			updateURL("requireapproval");
+		} else if (urlParams.has("requireapproval")) {
+			var href = new URL(window.location.href);
+			href.searchParams.delete("requireapproval");
+			if (!session.nohistory) {
+				window.history.pushState({ path: href.toString() }, "", href.toString());
+			}
+			urlParams = mergeFragmentParams(new URLSearchParams(window.location.search));
+			if (session.preset) {
+				let newURL = session.preset + "&" + urlParams.toString();
+				newURL = newURL.replace(/\?/g, "&");
+				newURL = newURL.replace(/\&/, "?");
+				urlParams = new URLSearchParams(newURL);
+			}
+		}
+	} catch (e) {
+		errorlog(e);
+	}
 
 	session.roomid = roomname;
 	getById("dirroomid").innerHTML = decodeURIComponent(session.roomid);
@@ -55703,10 +56022,10 @@ function effectsDynamicallyUpdate(event, ele) {
 	if (session.effect == "0" || !session.effect) {
 		updateRenderOutpipe();
 		return;
-	} else if (session.effect === "3" || session.effect === "4") {
-		if (!["3", "4", "5"].includes(lastEffectValue)) {
-			attemptTFLiteJsFileLoad();
-			if (!session.tfliteModule.looping) {
+	} else if (session.effect === "3" || session.effect === "4" || session.effect === "16") {
+		if (!["3", "4", "5", "16"].includes(lastEffectValue)) {
+			attemptSegmentationEffectModelLoad();
+			if (!(session.tfliteModule && session.tfliteModule.looping)) {
 				updateRenderOutpipe();
 			}
 		}
@@ -55725,9 +56044,9 @@ function effectsDynamicallyUpdate(event, ele) {
 			getById("selectEffectAmountInput3").value = session.effectValue;
 		}
 	} else if (session.effect === "5") {
-		if (!["3", "4", "5"].includes(lastEffectValue)) {
-			attemptTFLiteJsFileLoad();
-			if (!session.tfliteModule.looping) {
+		if (!["3", "4", "5", "16"].includes(lastEffectValue)) {
+			attemptSegmentationEffectModelLoad();
+			if (!(session.tfliteModule && session.tfliteModule.looping)) {
 				updateRenderOutpipe();
 			}
 		}
@@ -56135,6 +56454,132 @@ function loadTensorflowJS() {
 	script3.type = "text/javascript";
 	script4.type = "text/javascript";
 	document.head.appendChild(script);
+}
+
+var MEDIAPIPE_SELFIE_SEGMENTER = {
+	moduleUrl: "./thirdparty/mediapipe/tasks-vision/vision_bundle.mjs",
+	wasmRoot: "./thirdparty/mediapipe/tasks-vision/wasm",
+	modelAssetPath: "./thirdparty/mediapipe/models/selfie_segmenter_landscape_float16.tflite"
+};
+var mediaPipeSelfieSegmenterLoadPromise = null;
+function shouldUseMediaPipeSelfieSegmenter() {
+	if (typeof urlParams !== "undefined") {
+		if (urlParams.has("tfliteeffects") || urlParams.has("forcetflite") || urlParams.has("nomediapipe")) {
+			return false;
+		}
+	}
+	return true;
+}
+async function attemptMediaPipeSelfieSegmenterLoad() {
+	if (!shouldUseMediaPipeSelfieSegmenter()) {
+		return false;
+	}
+	if (session.mediaPipeSelfieSegmenter && session.mediaPipeSelfieSegmenter.ready) {
+		return true;
+	}
+	if (session.mediaPipeSelfieSegmenter && session.mediaPipeSelfieSegmenter.loading && mediaPipeSelfieSegmenterLoadPromise) {
+		return mediaPipeSelfieSegmenterLoadPromise;
+	}
+	if (mediaPipeSelfieSegmenterLoadPromise) {
+		return mediaPipeSelfieSegmenterLoadPromise;
+	}
+	warnUser("Loading selfie segmenter model...");
+	session.mediaPipeSelfieSegmenter = session.mediaPipeSelfieSegmenter || {};
+	session.mediaPipeSelfieSegmenter.loading = true;
+	session.mediaPipeSelfieSegmenter.failed = false;
+	mediaPipeSelfieSegmenterLoadPromise = (async () => {
+		const tasksVision = await import(MEDIAPIPE_SELFIE_SEGMENTER.moduleUrl);
+		const FilesetResolver = tasksVision.FilesetResolver;
+		const ImageSegmenter = tasksVision.ImageSegmenter;
+		if (!FilesetResolver || !ImageSegmenter) {
+			throw new Error("MediaPipe tasks-vision module is missing ImageSegmenter exports");
+		}
+		const vision = await FilesetResolver.forVisionTasks(MEDIAPIPE_SELFIE_SEGMENTER.wasmRoot);
+		let delegate = "GPU";
+		let segmenter = null;
+		try {
+			segmenter = await ImageSegmenter.createFromOptions(vision, {
+				baseOptions: {
+					modelAssetPath: MEDIAPIPE_SELFIE_SEGMENTER.modelAssetPath,
+					delegate: delegate
+				},
+				runningMode: "VIDEO",
+				outputCategoryMask: false,
+				outputConfidenceMasks: true
+			});
+		} catch (gpuError) {
+			delegate = "CPU";
+			segmenter = await ImageSegmenter.createFromOptions(vision, {
+				baseOptions: {
+					modelAssetPath: MEDIAPIPE_SELFIE_SEGMENTER.modelAssetPath,
+					delegate: delegate
+				},
+				runningMode: "VIDEO",
+				outputCategoryMask: false,
+				outputConfidenceMasks: true
+			});
+		}
+		let labels = [];
+		try {
+			labels = segmenter.getLabels() || [];
+		} catch (e) {
+			labels = [];
+		}
+		let personMaskIndex = 1;
+		if (labels.length) {
+			const detectedMaskIndex = labels.findIndex(label => /person|human|selfie|body|foreground/i.test(label || ""));
+			if (detectedMaskIndex >= 0) {
+				personMaskIndex = detectedMaskIndex;
+			} else {
+				personMaskIndex = Math.max(labels.length - 1, 0);
+			}
+		}
+		session.mediaPipeSelfieSegmenter = {
+			ready: true,
+			loading: false,
+			failed: false,
+			segmenter: segmenter,
+			labels: labels,
+			personMaskIndex: personMaskIndex,
+			delegate: delegate,
+			activelyProcessing: false,
+			offsetTime: 0
+		};
+		closeModal();
+		if (session.effect === "3" || session.effect === "4" || session.effect === "5" || session.effect === "16") {
+			updateRenderOutpipe();
+		}
+		return true;
+	})()
+		.catch(e => {
+			errorlog(e);
+			warnlog("MediaPipe selfie segmentation failed; falling back to local TFLite segmentation.");
+			session.mediaPipeSelfieSegmenter = session.mediaPipeSelfieSegmenter || {};
+			session.mediaPipeSelfieSegmenter.loading = false;
+			session.mediaPipeSelfieSegmenter.failed = true;
+			attemptTFLiteJsFileLoad();
+			return false;
+		})
+		.finally(() => {
+			mediaPipeSelfieSegmenterLoadPromise = null;
+			if (session.mediaPipeSelfieSegmenter) {
+				session.mediaPipeSelfieSegmenter.loading = false;
+			}
+		});
+	return mediaPipeSelfieSegmenterLoadPromise;
+}
+function attemptSegmentationEffectModelLoad() {
+	if (shouldUseMediaPipeSelfieSegmenter()) {
+		if (session.mediaPipeSelfieSegmenter && session.mediaPipeSelfieSegmenter.ready) {
+			return true;
+		}
+		if (session.mediaPipeSelfieSegmenter && session.mediaPipeSelfieSegmenter.failed) {
+			return attemptTFLiteJsFileLoad();
+		}
+		attemptMediaPipeSelfieSegmenterLoad();
+		return false;
+	}
+	return attemptTFLiteJsFileLoad();
 }
 
 var TFLITELOADING = false;

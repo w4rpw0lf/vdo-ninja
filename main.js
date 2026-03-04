@@ -7368,6 +7368,7 @@ async function main() {
 		// blur = 3
 		// green = 4
 		// image = 5
+		// transparent = 16
 	}
 
 	if (urlParams.has("effectvalue") || urlParams.has("ev")) {
@@ -8054,8 +8055,8 @@ async function main() {
 		delayedStartupFuncs = [];
 	}, 50);
 
-	if (session.effect == "3" || session.effect == "4" || session.effect == "5") {
-		attemptTFLiteJsFileLoad();
+	if (session.effect == "3" || session.effect == "4" || session.effect == "5" || session.effect == "16") {
+		attemptSegmentationEffectModelLoad();
 	} else if (session.effect == "6") {
 		loadTensorflowJS();
 	} else if (session.effect == "9") {
