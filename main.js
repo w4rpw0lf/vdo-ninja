@@ -5827,6 +5827,7 @@ async function main() {
 	}
 
 	if (urlParams.has("totalroombitrate") || urlParams.has("totalroomvideobitrate") || urlParams.has("trb") || urlParams.has("totalbitrate") || urlParams.has("tb")) {
+		session.totalRoomBitrate_userSet = true;
 		session.totalRoomBitrate = urlParams.get("totalroombitrate") || urlParams.get("totalroomvideobitrate") || urlParams.get("trb") || urlParams.get("totalbitrate") || urlParams.get("tb") || "";
 
 		if (session.totalRoomBitrate.split(",").length > 1) {
@@ -5848,6 +5849,20 @@ async function main() {
 		}
 		log("totalRoomBitrate ENABLED");
 		log(session.totalRoomBitrate);
+	}
+
+	if (urlParams.has("roomtier1bitrate") || urlParams.has("rt1b") || urlParams.has("roomonlylowbitrate") || urlParams.has("rolb")) {
+		var roomTier1Bitrate = parseInt(urlParams.get("roomtier1bitrate") || urlParams.get("rt1b") || urlParams.get("roomonlylowbitrate") || urlParams.get("rolb")) || 0;
+		if (roomTier1Bitrate > 0) {
+			session.roomTier1Bitrate = roomTier1Bitrate;
+		}
+	}
+
+	if (urlParams.has("roomtier2bitrate") || urlParams.has("rt2b") || urlParams.has("roomonlybitrate") || urlParams.has("rob")) {
+		var roomTier2Bitrate = parseInt(urlParams.get("roomtier2bitrate") || urlParams.get("rt2b") || urlParams.get("roomonlybitrate") || urlParams.get("rob")) || 0;
+		if (roomTier2Bitrate > 0) {
+			session.roomTier2Bitrate = roomTier2Bitrate;
+		}
 	}
 
 	if (session.totalRoomBitrate === false) {
@@ -8338,15 +8353,25 @@ async function main() {
 	if (urlParams.has("flagship")) {
 		session.flagship = true;
 	}
+
+	if (urlParams.has("nomobilebitratecap")) {
+		session.noMobileBitrateCap = true;
+	}
 	//if (!session.flagship && session.mobile && (session.limitTotalBitrate===false)){
 	// session.limitTotalBitrate = session.totalRoomBitrate_default; // 500, with the max per guest stream out at maxMobileBitrate (350kbps) or 35-kbps if more than X in the room.
 	//}
 
 	if (urlParams.has("maxmobilebitrate")) {
-		session.maxMobileBitrate = parseInt(urlParams.has("maxmobilebitrate")) || 0;
+		var maxMobileBitrate = parseInt(urlParams.get("maxmobilebitrate")) || 0;
+		if (maxMobileBitrate > 0) {
+			session.maxMobileBitrate = maxMobileBitrate;
+		}
 	}
 	if (urlParams.has("lowmobilebitrate")) {
-		session.lowMobileBitrate = parseInt(urlParams.has("lowmobilebitrate")) || 0;
+		var lowMobileBitrate = parseInt(urlParams.get("lowmobilebitrate")) || 0;
+		if (lowMobileBitrate > 0) {
+			session.lowMobileBitrate = lowMobileBitrate;
+		}
 	}
 
 	//  Please contact steve on discord.vdo.ninja if you'd like this iFRAME tweaked, expanded, etc -- it's updated based on user request

@@ -764,6 +764,7 @@ function judgePerformance() {
 		}
 
 		const cores = typeof navigator.hardwareConcurrency === 'number' ? navigator.hardwareConcurrency : 0;
+		const memory = typeof navigator.deviceMemory === 'number' ? navigator.deviceMemory : 0;
 
 		if (isIntelMac()) {
 			if (cores < 6) { // yes. they are that bad.
@@ -773,8 +774,14 @@ function judgePerformance() {
 			}
 		}
 
-		if (session.mobile && (cores >= 4)) { // assume hardware encoded acceleration
-			return 0;
+		if (session.mobile) {
+			if ((cores && cores < 4) || (memory && memory <= 2)) {
+				return 2;
+			} else if (cores >= 8 && (!memory || memory >= 6)) {
+				return 0;
+			} else if (cores >= 4) { // assume hardware encoded acceleration
+				return 1;
+			}
 		}
 
 		if (!cores) {
@@ -5521,6 +5528,172 @@ function changeSceneLowBandwidth(state) {
 	}
 }
 
+var screenShareResizeStabilizeDelay = 220;
+var screenShareResizeAspectTolerance = 0.003;
+
+function aspectRatiosClose(a, b) {
+	a = parseFloat(a) || 0;
+	b = parseFloat(b) || 0;
+	return Math.abs(a - b) <= screenShareResizeAspectTolerance;
+}
+
+function isScreenShareVideoElement(vid) {
+	try {
+		if (!vid) {
+			return false;
+		}
+		var vidUUID = vid.dataset && vid.dataset.UUID;
+		var vidSid = vid.dataset && vid.dataset.sid;
+		if (vid.id === "screensharesource" || (vidUUID && vidUUID.endsWith("_screen")) || (vidSid && vidSid.endsWith(":s"))) {
+			return true;
+		}
+		if (vid.id === "videosource" && session.screenShareState && !session.screenShareElement) {
+			return true;
+		}
+		if (vidUUID && session.rpcs && session.rpcs[vidUUID] && session.rpcs[vidUUID].screenShareState) {
+			return !session.rpcs[vidUUID + "_screen"];
+		}
+	} catch (e) { }
+	return false;
+}
+
+function setStableScreenShareAspectRatio(vid, aspectRatio) {
+	if (!isScreenShareVideoElement(vid)) {
+		return;
+	}
+	vid.stableScreenShareAspectRatio = parseFloat(aspectRatio) || 0;
+	vid.stableScreenShareWidth = parseInt(vid.videoWidth) || vid.stableScreenShareAspectRatio || 0;
+	vid.stableScreenShareHeight = parseInt(vid.videoHeight) || 1;
+}
+
+function getStableScreenShareVideoDimensions(vid) {
+	if (!isScreenShareVideoElement(vid)) {
+		return null;
+	}
+	var stableAspectRatio = parseFloat(vid.stableScreenShareAspectRatio) || parseFloat(vid.dataset && vid.dataset.aspectRatio) || 0;
+	if (!stableAspectRatio) {
+		return null;
+	}
+	if (vid.screenShareResizePending || !(vid.videoWidth && vid.videoHeight)) {
+		return {
+			width: stableAspectRatio,
+			height: 1
+		};
+	}
+	return null;
+}
+
+function commitVideoAspectRatio(v, aspectRatio, UUID) {
+	var changed = false;
+	if (v.resetAR) {
+		log("ASPECT RATIO UNMUTED");
+		delete v.resetAR;
+		changed = true;
+	} else if (v.dataset.aspectRatio) {
+		if (!aspectRatiosClose(aspectRatio, v.dataset.aspectRatio)) {
+			log("ASPECT RATIO CHANGED");
+			changed = true;
+		}
+	} else {
+		log("NEW VIDEO ? ASPECT RATIO new");
+		changed = true;
+	}
+
+	if (!changed) {
+		return false;
+	}
+	v.dataset.aspectRatio = aspectRatio;
+	pokeIframeAPI("aspect-ratio", v.dataset.aspectRatio, v.dataset.UUID, v.dataset.sid);
+	setTimeout(function () {
+		updateMixer();
+	}, 1);
+	return true;
+}
+
+function finishScreenShareAspectRatioResize(v, aspectRatio, UUID) {
+	v.screenShareResizePending = false;
+	v.pendingScreenShareAspectRatio = false;
+	setStableScreenShareAspectRatio(v, aspectRatio);
+	commitVideoAspectRatio(v, aspectRatio, UUID);
+}
+
+function handleScreenShareAspectRatioResize(v, aspectRatio, UUID) {
+	if (!isScreenShareVideoElement(v)) {
+		return false;
+	}
+
+	var currentAspectRatio = parseFloat(v.dataset.aspectRatio) || 0;
+	var stableAspectRatio = parseFloat(v.stableScreenShareAspectRatio) || currentAspectRatio || 0;
+	if (!stableAspectRatio) {
+		finishScreenShareAspectRatioResize(v, aspectRatio, UUID);
+		return true;
+	}
+
+	if (currentAspectRatio && aspectRatiosClose(aspectRatio, currentAspectRatio)) {
+		clearTimeout(v.screenShareResizeTimer);
+		v.screenShareResizePending = false;
+		v.pendingScreenShareAspectRatio = false;
+		delete v.resetAR;
+		v.dataset.aspectRatio = aspectRatio;
+		setStableScreenShareAspectRatio(v, aspectRatio);
+		return true;
+	}
+
+	clearTimeout(v.screenShareResizeTimer);
+	v.screenShareResizePending = true;
+	v.pendingScreenShareAspectRatio = aspectRatio;
+	v.screenShareResizeTimer = setTimeout(function (video, uuid) {
+		var settledAspectRatio = parseFloat(video.videoWidth / video.videoHeight) || video.pendingScreenShareAspectRatio || aspectRatio;
+		if (!settledAspectRatio) {
+			video.screenShareResizePending = false;
+			video.resetAR = true;
+			return;
+		}
+		finishScreenShareAspectRatioResize(video, settledAspectRatio, uuid);
+		if (session.viewChroma && !session.director) {
+			syncIncomingViewChromaCanvas(uuid);
+		}
+	}, screenShareResizeStabilizeDelay, v, UUID);
+	return true;
+}
+
+function handleVideoAspectRatioResize(v, UUID, applyIncomingRotation = false) {
+	var aspectRatio = parseFloat(v.videoWidth / v.videoHeight) || 0;
+	log("resize event: " + aspectRatio);
+
+	if (!aspectRatio) {
+		v.resetAR = true;
+		return;
+	}
+
+	if (applyIncomingRotation) {
+		if (typeof v.manualRotate == "number") {
+			//v.rotated = v.manualRotate; // ((session.rotate || 0) + 90) % 360;
+		} else if (session.keepIncomingVideosInLandscape) {
+			if (aspectRatio < 1) {
+				// session.keepIncomingVideosInLandscape
+				v.rotated = session.keepIncomingVideosInLandscape;
+			} else {
+				v.rotated = 0;
+			}
+		} else if (session.keepIncomingVideosInPortrait) {
+			if (aspectRatio > 1) {
+				// session.keepIncomingVideosInLandscape
+				v.rotated = session.keepIncomingVideosInPortrait;
+			} else {
+				v.rotated = 0;
+			}
+		}
+	}
+
+	if (!handleScreenShareAspectRatioResize(v, aspectRatio, UUID)) {
+		commitVideoAspectRatio(v, aspectRatio, UUID);
+	}
+	if (session.viewChroma && !session.director) {
+		syncIncomingViewChromaCanvas(UUID);
+	}
+}
+
 function setupIncomingScreenTracking(v, UUID) {
 	// SCREEN  element.
 
@@ -5594,43 +5767,7 @@ function setupIncomingScreenTracking(v, UUID) {
 
 	v.addEventListener("resize", e => {
 		// if the aspect ratio changes, then we might want to update the mixer.  If audio only, then this doesn't matter.
-		var v = e.target;
-		var aspectRatio = parseFloat(v.videoWidth / v.videoHeight) || 0;
-		log("resize event: " + aspectRatio);
-
-		if (!aspectRatio) {
-			v.resetAR = true;
-			return;
-		} // if Audio only, then we don't want to set or update any aspect ratio.
-
-		if (v.resetAR) {
-			log("ASPECT RATIO UNMUTED");
-			delete v.resetAR;
-			v.dataset.aspectRatio = aspectRatio;
-			pokeIframeAPI("aspect-ratio", v.dataset.aspectRatio, v.dataset.UUID, v.dataset.sid);
-			setTimeout(function () {
-				updateMixer();
-			}, 1);
-		} else if (v.dataset.aspectRatio) {
-			if (aspectRatio != parseFloat(v.dataset.aspectRatio)) {
-				log("ASPECT RATIO CHANGED");
-				v.dataset.aspectRatio = aspectRatio;
-				pokeIframeAPI("aspect-ratio", v.dataset.aspectRatio, v.dataset.UUID, v.dataset.sid);
-				setTimeout(function () {
-					updateMixer();
-				}, 1); // We don't want to run this on the first resize?  just subsequent ones.
-			}
-		} else {
-			log("NEW VIDEO ? ASPECT RATIO new");
-			v.dataset.aspectRatio = aspectRatio;
-			pokeIframeAPI("aspect-ratio", v.dataset.aspectRatio, v.dataset.UUID, v.dataset.sid);
-			setTimeout(function () {
-				updateMixer();
-			}, 1);
-		}
-		if (session.viewChroma && !session.director) {
-			syncIncomingViewChromaCanvas(UUID);
-		}
+		handleVideoAspectRatioResize(e.target, UUID, false);
 	});
 	if (typeof session.volume == "number") {
 		v.volume = session.volume;
@@ -6010,60 +6147,7 @@ function setupIncomingVideoTracking(v, UUID) {
 	}
 
 	v.addEventListener("resize", e => {
-		var v = e.target;
-		var aspectRatio = parseFloat(v.videoWidth / v.videoHeight) || 0;
-		log("resize event: " + aspectRatio);
-
-		if (!aspectRatio) {
-			v.resetAR = true;
-			return;
-		} // if Audio only, then we don't want to set or update any aspect ratio.
-		if (typeof v.manualRotate == "number") {
-			//v.rotated = v.manualRotate; // ((session.rotate || 0) + 90) % 360;
-		} else if (session.keepIncomingVideosInLandscape) {
-			if (aspectRatio < 1) {
-				// session.keepIncomingVideosInLandscape
-				v.rotated = session.keepIncomingVideosInLandscape;
-			} else {
-				v.rotated = 0;
-			}
-		} else if (session.keepIncomingVideosInPortrait) {
-			if (aspectRatio > 1) {
-				// session.keepIncomingVideosInLandscape
-				v.rotated = session.keepIncomingVideosInPortrait;
-			} else {
-				v.rotated = 0;
-			}
-		}
-
-		if (v.resetAR) {
-			log("ASPECT RATIO UNMUTED");
-			delete v.resetAR;
-			v.dataset.aspectRatio = aspectRatio;
-			pokeIframeAPI("aspect-ratio", v.dataset.aspectRatio, v.dataset.UUID, v.dataset.sid);
-			setTimeout(function () {
-				updateMixer();
-			}, 1);
-		} else if (v.dataset.aspectRatio) {
-			if (aspectRatio != parseFloat(v.dataset.aspectRatio)) {
-				log("ASPECT RATIO CHANGED");
-				v.dataset.aspectRatio = aspectRatio;
-				pokeIframeAPI("aspect-ratio", v.dataset.aspectRatio, v.dataset.UUID, v.dataset.sid);
-				setTimeout(function () {
-					updateMixer();
-				}, 1); // We don't want to run this on the first resize?  just subsequent ones.
-			}
-		} else {
-			log("NEW VIDEO ? ASPECT RATIO new");
-			v.dataset.aspectRatio = aspectRatio;
-			pokeIframeAPI("aspect-ratio", v.dataset.aspectRatio, v.dataset.UUID, v.dataset.sid);
-			setTimeout(function () {
-				updateMixer();
-			}, 1);
-		}
-		if (session.viewChroma && !session.director) {
-			syncIncomingViewChromaCanvas(UUID);
-		}
+		handleVideoAspectRatioResize(e.target, UUID, true);
 	});
 
 	if (typeof session.volume == "number") {
@@ -7330,6 +7414,8 @@ function updateMixerRun(e = false) {
 		} else {
 			var roomQuality = 0;
 			var screenShareTotal = 0;
+			var roomOnlyEligible = 0;
+			var roomOnlyTier = 0;
 
 			for (var i in session.rpcs) {
 				if (session.rpcs[i] === null) {
@@ -7361,6 +7447,11 @@ function updateMixerRun(e = false) {
 								//	mediaPool_invisible.push(session.rpcs[i].videoElement);  // skipped later on
 							} else {
 								roomQuality += 1;
+								var remoteRoomOnlyTier = parseInt(session.rpcs[i].roomOnlyTier) || 0;
+								if (remoteRoomOnlyTier > 0) {
+									roomOnlyEligible += 1;
+									roomOnlyTier = Math.max(roomOnlyTier, remoteRoomOnlyTier);
+								}
 								if (session.rpcs[i].screenShareState) {
 									screenShareTotal += 1;
 								}
@@ -7395,6 +7486,11 @@ function updateMixerRun(e = false) {
 
 			if (session.controlRoomBitrate !== false && session.controlRoomBitrate !== true) {
 				totalRoomBitrate = Math.min(session.controlRoomBitrate, totalRoomBitrate);
+			}
+
+			var roomOnlyBitrateActive = !session.totalRoomBitrate_userSet && !session.bitrate && session.roomid !== false && session.scene === false && !session.director && (session.controlRoomBitrate === false || session.controlRoomBitrate === true) && roomOnlyTier && roomOnlyEligible === roomQuality;
+			if (roomOnlyBitrateActive) {
+				totalRoomBitrate = Math.max(totalRoomBitrate, session.roomTier2Bitrate);
 			}
 
 			var roomBitrate = totalRoomBitrate;
@@ -7780,7 +7876,11 @@ function updateMixerRun(e = false) {
 							if (screenShareBitrate !== false && session.rpcs[i].screenShareState) {
 								delayedRequestRate(screenShareBitrate, i); // well, screw that. Setting it to room quality.
 							} else {
-								delayedRequestRate(roomBitrate, i); // well, screw that. Setting it to room quality.
+								var requestRoomBitrate = roomBitrate;
+								if (roomOnlyBitrateActive && (parseInt(session.rpcs[i].roomOnlyTier) || 0) === 1) {
+									requestRoomBitrate = Math.min(requestRoomBitrate, parseInt(session.roomTier1Bitrate / roomQuality));
+								}
+								delayedRequestRate(requestRoomBitrate, i); // well, screw that. Setting it to room quality.
 							}
 						}
 					} else {
@@ -8904,21 +9004,11 @@ function updateMixerRun(e = false) {
 			container.classList.add("container_holder_video");
 
 			// Add screen share class to individual containers
-			var isScreenShare = false;
+			var isScreenShare = isScreenShareVideoElement(vid);
 			var vidUUID = vid.dataset.UUID;
 			var vidSid = vid.dataset.sid;
 			if (vidUUID && session.rpcs[vidUUID] && !vidSid && session.rpcs[vidUUID].streamID) {
 				vidSid = session.rpcs[vidUUID].streamID;
-			}
-
-			if (vid.id === "screensharesource" || (vidUUID && vidUUID.endsWith("_screen")) || (vidSid && vidSid.endsWith(":s"))) {
-				isScreenShare = true;
-			} else if (vid.id === "videosource" && session.screenShareState && !session.screenShareElement) {
-				isScreenShare = true;
-			} else if (vidUUID && session.rpcs[vidUUID] && session.rpcs[vidUUID].screenShareState) {
-				if (!session.rpcs[vidUUID + "_screen"]) {
-					isScreenShare = true;
-				}
 			}
 
 			if (isScreenShare) {
@@ -9007,8 +9097,9 @@ function updateMixerRun(e = false) {
 				vid.style.maxWidth = maxWidth;
 				vid.style.maxHeight = maxHeight;
 
-				const vw = vid.naturalWidth || vid.videoWidth || 0;
-				const vh = vid.naturalHeight || vid.videoHeight || 0;
+				const stableScreenDimensions = getStableScreenShareVideoDimensions(vid);
+				const vw = stableScreenDimensions ? stableScreenDimensions.width : vid.naturalWidth || vid.videoWidth || 0;
+				const vh = stableScreenDimensions ? stableScreenDimensions.height : vid.naturalHeight || vid.videoHeight || 0;
 
 				if (vw && vh) {
 					// Calculate aspect ratios
@@ -9147,8 +9238,9 @@ function updateMixerRun(e = false) {
 				holder.paused.className = "hidden";
 			}
 
-			var vw = vid.naturalWidth || vid.videoWidth; // naturalWidth is for images I guess
-			var vh = vid.naturalHeight || vid.videoHeight;
+			var stableScreenDimensions = getStableScreenShareVideoDimensions(vid);
+			var vw = stableScreenDimensions ? stableScreenDimensions.width : vid.naturalWidth || vid.videoWidth; // naturalWidth is for images I guess
+			var vh = stableScreenDimensions ? stableScreenDimensions.height : vid.naturalHeight || vid.videoHeight;
 
 			// log(vw + " : "+vh);
 
@@ -9179,7 +9271,7 @@ function updateMixerRun(e = false) {
 				////////// COVER VERSION
 				if (session.sharperScreen && sssid && vid.dataset.sid && vid.dataset.sid === sssid) {
 					// do not dynamically scale the screen share feed.
-				} else if (session.dynamicScale) {
+				} else if (session.dynamicScale && !(isScreenShare && vid.screenShareResizePending)) {
 					if (vid.dataset.UUID) {
 						let targetWidth = wrw;
 						let targetHeight = hrh;
@@ -9346,7 +9438,7 @@ function updateMixerRun(e = false) {
 				////////// NON-COVER VERSION (based on holder)
 				if (session.sharperScreen && sssid && vid.dataset.sid && vid.dataset.sid === sssid) {
 					// do not dynamically scale the screen share feed.
-				} else if (session.dynamicScale) {
+				} else if (session.dynamicScale && !(isScreenShare && vid.screenShareResizePending)) {
 					if (vid.dataset.UUID) {
 						let targetWidth = wrw;
 						let targetHeight = hrh;
@@ -9376,7 +9468,7 @@ function updateMixerRun(e = false) {
 				//////////  UNKNOWN VERSION
 				if (session.sharperScreen && sssid && vid.dataset.sid && vid.dataset.sid === sssid) {
 					// do not dynamically scale the screen share feed.
-				} else if (session.dynamicScale) {
+				} else if (session.dynamicScale && !(isScreenShare && vid.screenShareResizePending)) {
 					if (vid.dataset.UUID) {
 						let targetWidth = wrw;
 						let targetHeight = hrh;
@@ -17944,6 +18036,15 @@ function updateLocalStats() {
 		session.cpuLimited = cpuLimited;
 		miniInfo.cpu = cpuLimited;
 		changed = true;
+	}
+
+	if (session.getRoomOnlyTier) {
+		var roomOnlyTier = session.getRoomOnlyTier();
+		if (session.roomOnlyTier !== roomOnlyTier) {
+			session.roomOnlyTier = roomOnlyTier;
+			miniInfo.rot = roomOnlyTier;
+			changed = true;
+		}
 	}
 
 	if (changed) {
@@ -36770,6 +36871,7 @@ function changeLTB(ele) {
 
 function changeTRB(ele) {
 	session.totalRoomBitrate = parseInt(ele.value);
+	session.totalRoomBitrate_userSet = true;
 	var msg = {};
 	msg.directorSettings = {};
 	msg.directorSettings.totalRoomBitrate = session.totalRoomBitrate;
@@ -43572,10 +43674,10 @@ async function requestGoogleDriveRecord(ele, state = null, bitrate = null, event
 
 		var filename = UUID;
 		if (session.rpcs[UUID]) {
-			filename = session.rpcs[UUID].label || session.rpcs[UUID].streamID || UUID;
+			filename = buildRecordingFilenameBase(session.rpcs[UUID].label, session.rpcs[UUID].streamID, UUID, 55);
+		} else {
+			filename = buildRecordingFilenameBase(UUID, false, "recording", 55);
 		}
-		filename = filename.replace(/[\W]+/g, "_");
-		filename = filename.substring(0, 55);
 		filename += "_" + Date.now().toString();
 		if (SafariVersion) {
 			filename += ".mp4";
@@ -43660,9 +43762,8 @@ async function multiGdriveRecord() {
 		const UUID = button.dataset.UUID || null;
 
 		// Generate unique filename for each recording
-		const filename = ((session.rpcs[UUID] && (session.rpcs[UUID].label || session.rpcs[UUID].streamID)) || UUID)
-			.replace(/[\W]+/g, "_")
-			.substring(0, 55) +
+		const rpc = session.rpcs[UUID] || {};
+		const filename = buildRecordingFilenameBase(rpc.label, rpc.streamID, UUID || "recording", 55) +
 			"_" + Date.now().toString() +
 			(SafariVersion ? ".mp4" : ".webm");
 
@@ -53166,15 +53267,7 @@ async function recordVideo(target, event = null, videoKbps = false) {
 	}
 
 	var timestamp = Date.now();
-	var filename = "";
-	if (session.rpcs[UUID].label && session.rpcs[UUID].streamID) {
-		filename = session.rpcs[UUID].label || session.rpcs[UUID].streamID;
-	} else {
-		filename = session.rpcs[UUID].label + "_" + session.rpcs[UUID].streamID;
-	}
-
-	filename = filename.replace(/[\W]+/g, "_");
-	filename = filename.substring(0, 200);
+	var filename = buildRecordingFilenameBase(session.rpcs[UUID].label, session.rpcs[UUID].streamID);
 	filename += "_" + timestamp.toString();
 
 	var writer = writable.getWriter();
@@ -53864,6 +53957,25 @@ function PCM16(stream) {
 }
 //// END OF PCM 16 SAVING CODE
 
+function normalizeRecordingFilenamePart(value) {
+	if (value === false || value === true || value === null || typeof value === "undefined") {
+		return "";
+	}
+	value = value.toString().trim();
+	if (!value || value === "false" || value === "null" || value === "undefined") {
+		return "";
+	}
+	return value;
+}
+
+function buildRecordingFilenameBase(primary, secondary, fallback = "recording", maxLength = 200) {
+	var filename = normalizeRecordingFilenamePart(primary) || normalizeRecordingFilenamePart(secondary) || normalizeRecordingFilenamePart(fallback) || "recording";
+	maxLength = parseInt(maxLength) || 200;
+	filename = filename.replace(/[\W]+/g, "_").replace(/^_+|_+$/g, "");
+	filename = filename.substring(0, maxLength);
+	return filename || "recording";
+}
+
 async function recordLocalVideo(action = null, configureRecording = false, remote = false, altUUID = false) {
 	// event.currentTarget,this.parentNode.parentNode.dataset.UUID
 
@@ -54003,13 +54115,7 @@ async function recordLocalVideo(action = null, configureRecording = false, remot
 	log(configureRecording);
 
 	var timestamp = Date.now();
-	var filename = "";
-	if (session.label || session.streamID) {
-		filename = session.label || session.streamID;
-		filename = filename.replace(/[\W]+/g, "_");
-		filename = filename.substring(0, 200);
-	}
-
+	var filename = buildRecordingFilenameBase(session.label, session.streamID);
 	filename += "_" + timestamp.toString();
 	log("filename: " + filename);
 
@@ -55992,6 +56098,8 @@ function addAudioPipeline(UUID, track) {
 }
 
 function processMiniInfoUpdate(miniInfo, UUID) {
+	var roomOnlyTierChanged = false;
+
 	if ("qlr" in miniInfo) {
 		session.rpcs[UUID].stats.info.quality_limitation_reason = miniInfo.qlr;
 	}
@@ -56032,6 +56140,19 @@ function processMiniInfoUpdate(miniInfo, UUID) {
 			session.rpcs[UUID].connectionDetails.innerText = "🔗" + session.rpcs[UUID].stats.info.total_outbound_p2p_connections;
 			session.rpcs[UUID].connectionDetails.dataset.value = session.rpcs[UUID].stats.info.total_outbound_p2p_connections;
 		}
+	}
+
+	if ("rot" in miniInfo) {
+		var roomOnlyTier = parseInt(miniInfo.rot) || 0;
+		if (session.rpcs[UUID].roomOnlyTier !== roomOnlyTier) {
+			roomOnlyTierChanged = true;
+		}
+		session.rpcs[UUID].roomOnlyTier = roomOnlyTier;
+		session.rpcs[UUID].stats.info.room_only_tier = roomOnlyTier;
+	}
+
+	if (roomOnlyTierChanged) {
+		updateMixer();
 	}
 
 	if (session.rpcs[UUID].batteryMeter) {
