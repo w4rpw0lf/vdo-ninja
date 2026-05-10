@@ -6301,6 +6301,15 @@ async function main() {
 		}
 	}
 
+	if (urlParams.has("noclaim") || urlParams.has("noautoclaim") || urlParams.has("nonclaiming")) {
+		session.noRoomClaim = true;
+	} else if (urlParams.has("claim")) {
+		const claimValue = (urlParams.get("claim") || "").toLowerCase();
+		if (claimValue === "0" || claimValue === "false" || claimValue === "off" || claimValue === "no") {
+			session.noRoomClaim = true;
+		}
+	}
+
 	if (urlParams.has("secure")) {
 		session.security = true;
 		if (!session.cleanOutput) {

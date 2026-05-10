@@ -1697,6 +1697,10 @@ body.podcast-studio-mode > :not(#podcast-root):not(#podcast-room-gate):not([data
   background: rgba(9, 11, 19, 0.65);
 }
 
+.iso-config-advanced[hidden] {
+  display: none;
+}
+
 .iso-config-advanced__summary {
   cursor: pointer;
   padding: 10px 12px;
@@ -1708,6 +1712,76 @@ body.podcast-studio-mode > :not(#podcast-root):not(#podcast-room-gate):not([data
   padding: 0 12px 12px;
   font-size: 0.75rem;
   color: rgba(255, 255, 255, 0.62);
+}
+
+.icecast-config__body {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 10px 12px;
+}
+
+.icecast-config__field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.icecast-config__label {
+  font-size: 0.64rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.48);
+}
+
+.icecast-config__hint {
+  color: rgba(255, 255, 255, 0.52);
+  font-size: 0.68rem;
+  line-height: 1.35;
+}
+
+.icecast-config .icecast-config__input {
+  min-width: 0;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(8, 10, 18, 0.88);
+  color: rgba(255, 255, 255, 0.84);
+  caret-color: rgba(255, 255, 255, 0.9);
+  font-size: 0.78rem;
+}
+
+.icecast-config .icecast-config__input::placeholder {
+  color: rgba(255, 255, 255, 0.38);
+}
+
+.icecast-config .icecast-config__input:-webkit-autofill,
+.icecast-config .icecast-config__input:-webkit-autofill:hover,
+.icecast-config .icecast-config__input:-webkit-autofill:focus {
+  -webkit-text-fill-color: rgba(255, 255, 255, 0.88);
+  caret-color: rgba(255, 255, 255, 0.9);
+  box-shadow: 0 0 0 1000px rgb(8, 10, 18) inset;
+  transition: background-color 9999s ease-in-out 0s;
+}
+
+.icecast-config .icecast-config__input:disabled {
+  opacity: 0.52;
+}
+
+.icecast-config__toggles {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+}
+
+.icecast-config__toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: rgba(255, 255, 255, 0.7);
+  font-size: 0.76rem;
 }
 
 .iso-config-summary {

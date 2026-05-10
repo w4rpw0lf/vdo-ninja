@@ -19346,7 +19346,7 @@ function initChatLiteIntegration() {
 		}
 	}
 
-	if (!hasChatLiteStateParam) {
+	if (hasChatLiteStateParam && !hasExplicitChatLiteDisable && (session.chatLiteEnabled || session.chatLiteButton || session.chatLiteAutoConfig)) {
 		const persistedVisible = getStorage("chatLiteVisible");
 		if (persistedVisible !== "") {
 			session.chatLiteVisible = normalizeChatLiteBoolean(persistedVisible, session.chatLiteVisible);
@@ -27948,6 +27948,48 @@ function toggleCoDirector_transfer(ele) {
 	session.codirector_transfer = ele.checked;
 }
 
+function buildCoDirectorInviteURL() {
+	var token = "";
+	if (session.token) {
+		token += "&token=" + session.token;
+	}
+
+	var roomKeyParam = session.claimBypassKey ? "&roomkey=" + session.claimBypassKey : "";
+	var url = "https://" + location.host + location.pathname + "?dir=" + session.roomid + getCloudflareInviteParam() + "&codirector=" + session.directorPassword + token + roomKeyParam;
+
+	if (session.codirectorNoClaim) {
+		url += "&noclaim";
+	}
+	if (session.approval_popup) {
+		url += "&approvepopup";
+	}
+
+	var implicitAuthSecret = session.authMode && session.authImplicitRoomSecret && (session.password === session.authImplicitRoomSecret);
+	if (implicitAuthSecret) {
+		url += "&auth";
+	}
+	if ((session.password !== session.sitePassword) && !implicitAuthSecret) {
+		if (session.password === false) {
+			url += "&password=false";
+		} else {
+			url += "&password=" + session.password;
+		}
+	}
+
+	return url;
+}
+
+function updateCoDirectorInviteLink() {
+	if (getById("codirectorSettings_invite")) {
+		getById("codirectorSettings_invite").value = buildCoDirectorInviteURL();
+	}
+}
+
+function toggleCoDirector_noClaim(ele) {
+	session.codirectorNoClaim = ele.checked;
+	updateCoDirectorInviteLink();
+}
+
 function updateConfirmAlt(context, inputText) {
 	try {
 		if (!context) { return; }
@@ -27969,26 +28011,12 @@ function toggleCoDirector_approve(ele) {
 
 // Route approvals are default; no UI toggle needed anymore.
 
-	function toggleApprovalPopup(ele) {
-		session.approval_popup = ele.checked;
-		try {
-				var token = "";
-				if (session.token) { token += "&token=" + session.token; }
-				var roomKeyParam = session.claimBypassKey ? "&roomkey=" + session.claimBypassKey : "";
-				var url = "https://" + location.host + location.pathname + "?dir=" + session.roomid + getCloudflareInviteParam() + "&codirector=" + session.directorPassword + token + roomKeyParam;
-				if (session.approval_popup) { url += "&approvepopup"; }
-				try { console.log("[flags] toggled approval_popup=" + session.approval_popup + "; co-director invite=" + url); } catch (e) { }
-				var implicitAuthSecret = session.authMode && session.authImplicitRoomSecret && (session.password === session.authImplicitRoomSecret);
-				if (implicitAuthSecret) { url += "&auth"; }
-				if ((session.password !== session.sitePassword) && !implicitAuthSecret) {
-					if (session.password === false) { url += "&password=false"; }
-					else { url += "&password=" + session.password; }
-				}
-				if (getById("codirectorSettings_invite")) {
-					getById("codirectorSettings_invite").value = url;
-				}
-			} catch (e) { /* noop */ }
-		}
+function toggleApprovalPopup(ele) {
+	session.approval_popup = ele.checked;
+	try {
+		updateCoDirectorInviteLink();
+	} catch (e) { /* noop */ }
+}
 
 async function toggleCoDirector(ele) {
 	//session.coDirectorAllowed = ele.checked;
@@ -28025,30 +28053,13 @@ async function toggleCoDirector(ele) {
 	if (session.codirector_changeURL) {
 		getById("codirectorSettings_changeurl").checked = true;
 	} else {
-		getById(codirectorSettings_changeurl).checked = false;
+		getById("codirectorSettings_changeurl").checked = false;
 	}
 
-	var token = "";
-	if (session.token) {
-		token += "&token=" + session.token;
+	if (getById("codirectorSettings_noclaim")) {
+		getById("codirectorSettings_noclaim").checked = !!session.codirectorNoClaim;
 	}
-	var roomKeyParam = session.claimBypassKey ? "&roomkey=" + session.claimBypassKey : "";
-
-	getById("codirectorSettings_invite").value = "https://" + location.host + location.pathname + "?dir=" + session.roomid + getCloudflareInviteParam() + "&codirector=" + session.directorPassword + token + roomKeyParam;
-	if (session.approval_popup) {
-		getById("codirectorSettings_invite").value += "&approvepopup";
-	}
-	var implicitAuthSecret = session.authMode && session.authImplicitRoomSecret && (session.password === session.authImplicitRoomSecret);
-	if (implicitAuthSecret) {
-		getById("codirectorSettings_invite").value += "&auth";
-	}
-	if ((session.password !== session.sitePassword) && !implicitAuthSecret) {
-		if (session.password === false) {
-			getById("codirectorSettings_invite").value += "&password=false";
-		} else {
-			getById("codirectorSettings_invite").value += "&password=" + session.password;
-		}
-	}
+	updateCoDirectorInviteLink();
 
 	getById("codirectorSettings").style.display = "block";
 }
@@ -28281,37 +28292,20 @@ async function createRoomCallback(passAdd, passAdd2) {
 		getById("coDirectorEnable").checked = true;
 		getById("coDirectorEnableSpan").style.display = "none";
 
-		var token = "";
-		if (session.token) {
-			token += "&token=" + session.token;
-		}
-			var roomKeyParam = session.claimBypassKey ? "&roomkey=" + session.claimBypassKey : "";
+		updateCoDirectorInviteLink();
 
-			getById("codirectorSettings_invite").value = "https://" + location.host + location.pathname + "?dir=" + session.roomid + getCloudflareInviteParam() + "&codirector=" + session.directorPassword + token + roomKeyParam;
-			if (session.approval_popup) {
-				getById("codirectorSettings_invite").value += "&approvepopup";
-			}
-			var implicitAuthSecret = session.authMode && session.authImplicitRoomSecret && (session.password === session.authImplicitRoomSecret);
-			if (implicitAuthSecret) {
-				getById("codirectorSettings_invite").value += "&auth";
-			}
-			if ((session.password !== session.sitePassword) && !implicitAuthSecret) {
-				if (session.password == false) {
-					getById("codirectorSettings_invite").value += "&password=false";
-				} else {
-					getById("codirectorSettings_invite").value += "&password=" + session.password;
-				}
-			}
-
-			if (session.codirector_transfer) {
-				getById("codirectorSettings_transfer").checked = true;
-			} else {
+		if (session.codirector_transfer) {
+			getById("codirectorSettings_transfer").checked = true;
+		} else {
 			getById("codirectorSettings_transfer").checked = false;
 		}
 		if (session.codirector_changeURL) {
 			getById("codirectorSettings_changeurl").checked = true;
 		} else {
 			getById("codirectorSettings_changeurl").checked = false;
+		}
+		if (getById("codirectorSettings_noclaim")) {
+			getById("codirectorSettings_noclaim").checked = !!session.codirectorNoClaim;
 		}
 		getById("codirectorSettings").style.display = "block";
 	}
@@ -34002,26 +33996,37 @@ function flattenConstraints(constraints) {
 	return result;
 }
 
-async function getAudioOnly(selector, trackid = null, override = false, requestToken = null) {
+async function getAudioOnly(selector, trackid = null, override = false, requestToken = null, preserveSelectedAudio = false) {
 	var audioSelect = document.querySelector(selector).querySelectorAll("input,option");
 	var audioList = [];
 	var streams = [];
 	log("getAudioOnly()");
 
-	// Fast-path: if override includes a specific deviceId, use it directly
-	if (override && override.audio && (override.audio.deviceId || (override.audio.deviceId && override.audio.deviceId.exact))) {
-		let o = JSON.parse(JSON.stringify(override));
-		if (typeof o.audio.deviceId === "string") {
-			o.audio.deviceId = { exact: o.audio.deviceId };
+	let overrideAudioConstraint = false;
+	let overrideAudioDeviceId = false;
+	if (override && override.audio) {
+		overrideAudioConstraint = JSON.parse(JSON.stringify(override));
+		if (overrideAudioConstraint.audio.deviceId) {
+			if (typeof overrideAudioConstraint.audio.deviceId === "string") {
+				overrideAudioConstraint.audio.deviceId = { exact: overrideAudioConstraint.audio.deviceId };
+			}
+			if (overrideAudioConstraint.audio.deviceId && typeof overrideAudioConstraint.audio.deviceId === "object") {
+				overrideAudioDeviceId = overrideAudioConstraint.audio.deviceId.exact || overrideAudioConstraint.audio.deviceId.ideal || false;
+			} else {
+				overrideAudioDeviceId = overrideAudioConstraint.audio.deviceId;
+			}
 		}
-		o.video = false;
+		overrideAudioConstraint.video = false;
+	}
+	if (overrideAudioConstraint && overrideAudioDeviceId && !preserveSelectedAudio) {
+		let constraint = overrideAudioConstraint;
 		if (Firefox) {
-			o = toFirefoxConstraint(o);
+			constraint = toFirefoxConstraint(constraint);
 		}
 		warnlog("navigator.mediaDevices.getUserMedia starting (override)...");
 		if (navigator.mediaDevices) {
 			var stream = await navigator.mediaDevices
-				.getUserMedia(o)
+				.getUserMedia(constraint)
 				.then(function (stream2) {
 					log("get audio sucecss");
 					pokeIframeAPI("local-microphone-event");
@@ -34041,6 +34046,7 @@ async function getAudioOnly(selector, trackid = null, override = false, requestT
 		}
 		return streams;
 	}
+
 	for (var i = 0; i < audioSelect.length; i++) {
 		if (audioSelect[i].value == "ZZZ") {
 			continue;
@@ -34171,12 +34177,9 @@ async function getAudioOnly(selector, trackid = null, override = false, requestT
 			}
 		}
 		constraint.video = false;
-		if (override !== false) {
+		if (overrideAudioConstraint && (!overrideAudioDeviceId || audioList[i].value === overrideAudioDeviceId)) {
 			log("Override true");
-			constraint = override;
-			if (constraint.audio && typeof constraint.audio.deviceId === "string") {
-				constraint.audio.deviceId = { exact: constraint.audio.deviceId };
-			}
+			constraint = JSON.parse(JSON.stringify(overrideAudioConstraint));
 		}
 
 		if (audioList[i].value && SelectedAudioInputDevices) {
@@ -38204,7 +38207,7 @@ function pushOutVideoTrack(track) {
 	session.refreshScale();
 }
 
-async function grabAudio(selector = "#audioSource", trackid = null, override = false, callbackUUID = false, callback = false) {
+async function grabAudio(selector = "#audioSource", trackid = null, override = false, callbackUUID = false, callback = false, preserveSelectedAudio = false) {
 	// trackid is the excluded track , callback is UUID
 
 	if (activatedPreview == true) {
@@ -38341,7 +38344,7 @@ async function grabAudio(selector = "#audioSource", trackid = null, override = f
 		errorlog(e);
 	}
 
-	var streams = await getAudioOnly(selector, trackid, override, gumAudioID); // Get audio streams
+	var streams = await getAudioOnly(selector, trackid, override, gumAudioID, preserveSelectedAudio); // Get audio streams
 
 	if (gumAudioID !== getAudioUserMediaRequestID) {
 		try {
@@ -46212,7 +46215,7 @@ function applyAudioHack(constraint, value = null, deviceid = "default") {
 	enumerateDevices()
 		.then(gotDevices2)
 		.then(function () {
-			grabAudio("#audioSource3", null, new_constraints, false, saveAudioResult);
+			grabAudio("#audioSource3", null, new_constraints, false, saveAudioResult, true);
 		});
 }
 

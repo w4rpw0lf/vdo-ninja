@@ -113,25 +113,29 @@ const RECORDING_QUALITY_PRESETS = {
     label: "Smaller File",
     bitrateMultiplier: 0.78,
     minBitrate: 6_000_000,
-    maxBitrate: 30_000_000
+    maxBitrate: 30_000_000,
+    audioBitrate: 128_000
   },
   balanced: {
     label: "Balanced",
     bitrateMultiplier: 1,
     minBitrate: 8_000_000,
-    maxBitrate: 45_000_000
+    maxBitrate: 45_000_000,
+    audioBitrate: 160_000
   },
   high: {
     label: "High Detail",
     bitrateMultiplier: 1.45,
     minBitrate: 10_000_000,
-    maxBitrate: 60_000_000
+    maxBitrate: 60_000_000,
+    audioBitrate: 192_000
   },
   master: {
     label: "Archive / Master",
     bitrateMultiplier: 2,
     minBitrate: 12_000_000,
-    maxBitrate: 85_000_000
+    maxBitrate: 85_000_000,
+    audioBitrate: 256_000
   }
 };
 const RECORDING_CODEC_OPTIONS = {
@@ -139,6 +143,8 @@ const RECORDING_CODEC_OPTIONS = {
     label: "Auto (Stable)",
     candidates: [
       { key: "vp8", label: "VP8 WebM", mimeType: "video/webm;codecs=vp8,opus" },
+      { key: "h264", label: "H.264 MP4", mimeType: "video/mp4;codecs=avc1.640032,mp4a.40.2" },
+      { key: "h264", label: "H.264 MP4", mimeType: "video/mp4;codecs=avc1.4d002a,mp4a.40.2" },
       { key: "h264", label: "H.264 MP4", mimeType: "video/mp4;codecs=avc1.42E01E,mp4a.40.2" },
       { key: "vp9", label: "VP9 WebM", mimeType: "video/webm;codecs=vp9,opus" },
       { key: "mp4", label: "MP4", mimeType: "video/mp4" },
@@ -1027,6 +1033,10 @@ function syncMicDependentControls() {
   el.includeSystemAudio.disabled = captureOptionsLocked;
   el.faceCrop.disabled = !hasFaceDetectionSupport() || !el.includeWebcam.checked || captureOptionsLocked;
   el.refreshDevicesBtn.disabled = captureOptionsLocked || !navigator.mediaDevices?.enumerateDevices;
+  // Resolution/aspect changes resize the capture canvas and would corrupt an in-flight recording.
+  const resolutionLocked = state.phase === "recording" || state.phase === "paused" || state.isRecordingStarting || state.isRestarting;
+  el.outputResolution.disabled = resolutionLocked;
+  el.aspectRatio.disabled = resolutionLocked;
   micProcessingControls.forEach((control) => {
     if (control) {
       control.disabled = micDisabled || control.dataset.supported === "0";
@@ -1385,7 +1395,7 @@ async function switchDisplaySource() {
       const newAudioStream = new MediaStream(state.displayStream.getAudioTracks());
       const newSource = state.audioMixContext.createMediaStreamSource(newAudioStream);
       const newGain = state.audioMixContext.createGain();
-      newGain.gain.value = 0.9;
+      newGain.gain.value = 1.0;
       newSource.connect(newGain).connect(state.mixedDestination);
       state.displayAudioSourceNode = newSource;
       state.displayAudioGainNode = newGain;
@@ -1463,7 +1473,7 @@ async function switchMicSource(deviceId) {
         micNode = micCompressor;
       }
       const micGain = state.audioMixContext.createGain();
-      micGain.gain.value = 1.1;
+      micGain.gain.value = 1.0;
       micNode.connect(micGain).connect(state.mixedDestination);
       state.micSourceNode = micSource;
       state.micGainNode = micGain;
@@ -1963,7 +1973,7 @@ async function buildOutputStream(options = getOptions()) {
       micNode = micCompressor;
     }
     const micGain = mixContext.createGain();
-    micGain.gain.value = 1.1;
+    micGain.gain.value = 1.0;
 
     micNode.connect(micGain).connect(destination);
     state.micSourceNode = micSource;
@@ -1975,7 +1985,7 @@ async function buildOutputStream(options = getOptions()) {
     const displayAudioStream = new MediaStream(state.displayStream.getAudioTracks());
     const displaySource = mixContext.createMediaStreamSource(displayAudioStream);
     const displayGain = mixContext.createGain();
-    displayGain.gain.value = 0.9;
+    displayGain.gain.value = 1.0;
     displaySource.connect(displayGain).connect(destination);
     state.displayAudioSourceNode = displaySource;
     state.displayAudioGainNode = displayGain;
@@ -3380,7 +3390,7 @@ function estimateMegabytesPerMinute(videoBitsPerSecond, audioBitsPerSecond = 0) 
 function resolveRecorderConfig(options) {
   const quality = getRecordingQualityPreset(options.recordingQuality);
   const mimeChoice = pickMimeType(options.recordingCodec);
-  const audioBitsPerSecond = state.outputStream?.getAudioTracks().length ? 160000 : 0;
+  const audioBitsPerSecond = state.outputStream?.getAudioTracks().length ? quality.audioBitrate : 0;
   return {
     qualityKey: quality.key,
     qualityLabel: quality.label,
@@ -3403,7 +3413,7 @@ function updateOutputQualityHint() {
   const preset = getOutputResolutionPreset(el.outputResolution.value);
   const quality = getRecordingQualityPreset(el.recordingQuality.value);
   const codec = pickMimeType(el.recordingCodec.value);
-  const audioBitsPerSecond = el.includeMic.checked || el.includeSystemAudio.checked ? 160000 : 0;
+  const audioBitsPerSecond = el.includeMic.checked || el.includeSystemAudio.checked ? quality.audioBitrate : 0;
   const videoBitsPerSecond = estimateVideoBitrate(preset.width, preset.height, quality.key);
   const mbps = (videoBitsPerSecond / 1_000_000).toFixed(1);
   const sizePerMinute = estimateMegabytesPerMinute(videoBitsPerSecond, audioBitsPerSecond).toFixed(0);

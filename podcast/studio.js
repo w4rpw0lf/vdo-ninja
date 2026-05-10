@@ -7,6 +7,7 @@ import {
   bridgeLegacyMeters,
   monitorTrackLevel,
 } from '../core/index.js';
+import { IcecastPublisher, ICECAST_MIME_OPTIONS } from './icecast-publisher.js?v=2';
 
 const STUDIO_ROOT_ID = 'podcast-root';
 const ROSTER_REFRESH_MS = 1500;
@@ -18,6 +19,10 @@ const CLOUD_STATUS_STORAGE_KEY = 'podcastStudio.cloudStatus';
 const CLOUD_STATUS_STALE_MS = 30 * 60 * 1000;
 const DISK_RECORDING_STORAGE_KEY = 'podcastStudio.diskRecordingState';
 const CAPTURE_MODE_STORAGE_KEY = 'podcastStudio.captureMode';
+const ICECAST_SETTINGS_STORAGE_KEY = 'podcastStudio.icecastSettings';
+const ICECAST_SETTINGS_VERSION = 2;
+const DEFAULT_ICECAST_MIME_TYPE = ICECAST_MIME_OPTIONS[0].value;
+const DEFAULT_ICECAST_RELAY_URL = 'https://vdo-ninja-icecast-relay.vdo.workers.dev/publish';
 const DISK_DB_NAME = 'podcastStudio.disk';
 const DISK_DB_STORE = 'handles';
 const PODCAST_CLOUD_EVENT = 'podcast-cloud-status';
@@ -61,7 +66,7 @@ function injectStylesheet() {
   const link = document.createElement('link');
   link.id = 'podcast-studio-style';
   link.rel = 'stylesheet';
-  link.href = new URL('./studio.css?v=13', import.meta.url).toString();
+  link.href = new URL('./studio.css?v=15', import.meta.url).toString();
   document.head.appendChild(link);
 }
 
@@ -632,6 +637,79 @@ function writeCaptureMode(mode) {
     console.warn('Unable to persist capture mode', error);
   }
   return normalized;
+}
+
+function readIcecastSettings() {
+  try {
+    const raw = window.localStorage.getItem(ICECAST_SETTINGS_STORAGE_KEY);
+    if (!raw) {
+      return {};
+    }
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object') {
+      return {};
+    }
+    const settings = { ...parsed };
+    const version = Number(settings.version || 0);
+    if (version < ICECAST_SETTINGS_VERSION && (!settings.mimeType || settings.mimeType === 'audio/webm;codecs=opus' || settings.mimeType === 'audio/webm')) {
+      settings.mimeType = DEFAULT_ICECAST_MIME_TYPE;
+    }
+    settings.version = ICECAST_SETTINGS_VERSION;
+    return settings;
+  } catch (error) {
+    console.warn('Unable to read Icecast settings', error);
+    return {};
+  }
+}
+
+function writeIcecastSettings(settings) {
+  const safeSettings = { ...(settings || {}) };
+  delete safeSettings.relayUrl;
+  delete safeSettings.relayToken;
+  safeSettings.version = ICECAST_SETTINGS_VERSION;
+  try {
+    window.localStorage.setItem(ICECAST_SETTINGS_STORAGE_KEY, JSON.stringify(safeSettings));
+  } catch (error) {
+    console.warn('Unable to store Icecast settings', error);
+  }
+}
+
+function readUrlParam(name) {
+  try {
+    if (typeof urlParams !== 'undefined' && urlParams && typeof urlParams.get === 'function') {
+      return urlParams.get(name) || '';
+    }
+  } catch (error) {
+    console.warn('Unable to read URL params', error);
+  }
+  try {
+    const params = new URLSearchParams(window.location.search);
+    return params.get(name) || '';
+  } catch (error) {
+    console.warn('Unable to parse URL params', error);
+  }
+  return '';
+}
+
+function resolveIcecastRelayUrl(settings = {}) {
+  const configured =
+    (typeof window !== 'undefined' && typeof window.VDO_NINJA_ICECAST_RELAY_URL === 'string'
+      ? window.VDO_NINJA_ICECAST_RELAY_URL
+      : '') ||
+    readUrlParam('icecastrelay') ||
+    readUrlParam('icecastrelayurl') ||
+    settings.relayUrl ||
+    DEFAULT_ICECAST_RELAY_URL;
+  return (configured || '').trim();
+}
+
+function resolveIcecastRelayToken() {
+  const configured =
+    (typeof window !== 'undefined' && typeof window.VDO_NINJA_ICECAST_RELAY_TOKEN === 'string'
+      ? window.VDO_NINJA_ICECAST_RELAY_TOKEN
+      : '') ||
+    readUrlParam('icecastrelaytoken');
+  return (configured || '').trim();
 }
 
 
@@ -1473,6 +1551,21 @@ class PodcastStudioApp {
     this.guestBackupButton = null;
     this.guestBackupStatusNode = null;
     this.currentRecordingMode = readCaptureMode();
+    this.icecastPublisher = null;
+    this.icecastButton = null;
+    this.icecastSettingsButton = null;
+    this.icecastSettingsPanel = null;
+    this.icecastStatusNode = null;
+    this.icecastTargetInput = null;
+    this.icecastUsernameInput = null;
+    this.icecastPasswordInput = null;
+    this.icecastMimeSelect = null;
+    this.icecastPublicInput = null;
+    this.icecastNameInput = null;
+    this.icecastGenreInput = null;
+    this.icecastLive = false;
+    this.icecastBusy = false;
+    this.icecastSettingsOpen = false;
   }
 
   async init() {
@@ -1490,10 +1583,16 @@ class PodcastStudioApp {
       monitorLevels: true,
       timeslice: 1000,
     });
+    this.icecastPublisher = new IcecastPublisher({
+      audioContext: this.audioContext,
+      getParticipants: () => this.getIcecastMixParticipants(),
+    });
+    this.attachIcecastEvents();
     this.cloud = new CloudUploadCoordinator(this.session);
 
     this.roomName = this.resolveRoomName();
     this.buildLayout();
+    this.updateIcecastUI();
     this.updateReadinessSummary();
     this.updateRecordingButtons();
     if (STUDIO_DISK_FEATURE_FLAG) {
@@ -2274,6 +2373,190 @@ class PodcastStudioApp {
     return new AudioCtx();
   }
 
+  attachIcecastEvents() {
+    if (!this.icecastPublisher) {
+      return;
+    }
+    this.icecastPublisher.addEventListener('status', (event) => {
+      const detail = event.detail || {};
+      const state = detail.state === 'live' ? 'ready' : detail.state === 'connecting' ? 'pending' : detail.state || 'idle';
+      this.icecastLive = state === 'ready' || state === 'pending';
+      this.setIcecastStatus(detail.message || 'Icecast idle.', state);
+      this.updateIcecastUI();
+      this.updateReadinessSummary();
+    });
+    this.icecastPublisher.addEventListener('progress', (event) => {
+      const detail = event.detail || {};
+      if (!this.icecastPublisher?.isLive()) {
+        return;
+      }
+      const elapsedSeconds = detail.startedAt ? Math.max(1, Math.round((Date.now() - detail.startedAt) / 1000)) : 0;
+      const bytes = detail.bytesSent || 0;
+      this.setIcecastStatus(`Live ${this.formatFileSize(bytes)}${elapsedSeconds ? ` / ${this.formatDuration(elapsedSeconds)}` : ''}`, 'ready');
+    });
+    this.icecastPublisher.addEventListener('error', (event) => {
+      const error = event.detail;
+      this.icecastLive = false;
+      this.setIcecastStatus(error?.message || 'Icecast publish failed.', 'error');
+      this.updateIcecastUI();
+      this.updateReadinessSummary();
+    });
+  }
+
+  getIcecastMixParticipants() {
+    const participants = [];
+    Object.entries(this.session?.rpcs || {}).forEach(([uuid, peer]) => {
+      const stream = peer?.streamSrc || peer?.stream || peer?.videoElement?.srcObject || null;
+      if (!stream || !stream.getAudioTracks?.().length) {
+        return;
+      }
+      participants.push({
+        uuid,
+        label: peer.label || peer.streamID || uuid,
+        stream,
+        streamID: peer.streamID || uuid,
+        role: 'remote',
+      });
+    });
+    this.virtualParticipants.forEach((participant) => {
+      if (participant?.stream?.getAudioTracks?.().length) {
+        participants.push({ ...participant });
+      }
+    });
+    return participants;
+  }
+
+  collectIcecastSettingsFromForm() {
+    const targetUrl = (this.icecastTargetInput?.value || '').trim();
+    const username = (this.icecastUsernameInput?.value || 'source').trim() || 'source';
+    const password = this.icecastPasswordInput?.value || '';
+    const mimeType = this.icecastMimeSelect?.value || ICECAST_MIME_OPTIONS[0].value;
+    const isPublic = Boolean(this.icecastPublicInput?.checked);
+    const name = (this.icecastNameInput?.value || '').trim();
+    const genre = (this.icecastGenreInput?.value || '').trim();
+    return {
+      targetUrl,
+      username,
+      password,
+      mimeType,
+      public: isPublic,
+      name,
+      genre,
+    };
+  }
+
+  persistIcecastSettingsFromForm() {
+    writeIcecastSettings(this.collectIcecastSettingsFromForm());
+  }
+
+  readIcecastConfigFromForm() {
+    const storedSettings = this.collectIcecastSettingsFromForm();
+    const relayUrl = resolveIcecastRelayUrl(storedSettings);
+    const relayToken = resolveIcecastRelayToken();
+    writeIcecastSettings(storedSettings);
+    return {
+      relayUrl,
+      targetUrl: storedSettings.targetUrl,
+      username: storedSettings.username,
+      password: storedSettings.password,
+      relayToken,
+      mimeType: storedSettings.mimeType,
+      metadata: {
+        name: storedSettings.name || 'VDO.Ninja Live',
+        genre: storedSettings.genre || 'Live',
+        public: storedSettings.public,
+      },
+    };
+  }
+
+  setIcecastStatus(message, state = 'idle') {
+    if (!this.icecastStatusNode) {
+      return;
+    }
+    this.icecastStatusNode.textContent = message || 'Idle';
+    this.icecastStatusNode.dataset.state = state;
+  }
+
+  updateIcecastUI() {
+    const live = Boolean(this.icecastPublisher?.isLive());
+    this.icecastLive = live;
+    if (this.icecastButton) {
+      this.icecastButton.disabled = this.icecastBusy;
+      this.icecastButton.textContent = live ? 'Stop live' : this.icecastBusy ? 'Starting...' : 'Start live';
+      this.icecastButton.dataset.state = live ? 'enabled' : 'idle';
+    }
+    if (this.icecastSettingsButton) {
+      this.icecastSettingsButton.disabled = live || this.icecastBusy;
+      this.icecastSettingsButton.textContent = this.icecastSettingsOpen ? 'Hide settings' : 'Settings';
+      this.icecastSettingsButton.setAttribute('aria-expanded', this.icecastSettingsOpen ? 'true' : 'false');
+    }
+    if (this.icecastSettingsPanel) {
+      this.icecastSettingsPanel.hidden = !this.icecastSettingsOpen;
+    }
+    [
+      this.icecastTargetInput,
+      this.icecastUsernameInput,
+      this.icecastPasswordInput,
+      this.icecastMimeSelect,
+      this.icecastPublicInput,
+      this.icecastNameInput,
+      this.icecastGenreInput,
+    ].forEach((node) => {
+      if (node) {
+        node.disabled = live || this.icecastBusy;
+      }
+    });
+  }
+
+  toggleIcecastSettings() {
+    if (this.icecastPublisher?.isLive() || this.icecastBusy) {
+      return;
+    }
+    this.icecastSettingsOpen = !this.icecastSettingsOpen;
+    this.updateIcecastUI();
+  }
+
+  async handleIcecastToggle() {
+    if (!this.icecastPublisher || this.icecastBusy) {
+      return;
+    }
+    if (this.icecastPublisher.isLive()) {
+      this.icecastBusy = true;
+      this.updateIcecastUI();
+      this.setIcecastStatus('Stopping...', 'pending');
+      try {
+        await this.icecastPublisher.stop();
+      } catch (error) {
+        console.warn('Failed to stop Icecast publisher', error);
+        this.setIcecastStatus(error?.message || 'Stop failed.', 'error');
+      } finally {
+        this.icecastBusy = false;
+        this.icecastLive = false;
+        this.updateIcecastUI();
+        this.updateReadinessSummary();
+      }
+      return;
+    }
+    this.icecastBusy = true;
+    this.updateIcecastUI();
+    this.setIcecastStatus('Starting...', 'pending');
+    try {
+      await this.ensureAudioContextResumed();
+      this.icecastPublisher.setAudioContext(this.audioContext);
+      const config = this.readIcecastConfigFromForm();
+      await this.icecastPublisher.start(config);
+      this.icecastLive = true;
+    } catch (error) {
+      console.error('Failed to start Icecast publisher', error);
+      this.icecastLive = false;
+      this.setIcecastStatus(error?.message || 'Unable to start.', 'error');
+    } finally {
+      this.icecastBusy = false;
+      this.updateIcecastUI();
+      this.updateReadinessSummary();
+    }
+  }
+
   buildLayout() {
     if (document.getElementById(STUDIO_ROOT_ID)) {
       return;
@@ -2579,6 +2862,120 @@ class PodcastStudioApp {
       this.updateDiskRecordingUI();
     }
 
+    const icecastSettings = readIcecastSettings();
+    const icecastRow = createElement('div', 'iso-config-row iso-config-row--icecast');
+    icecastRow.append(createElement('div', 'iso-config-row__label', { text: 'Icecast' }));
+    const icecastActions = createElement('div', 'iso-config-row__actions');
+    this.icecastButton = createElement('button', 'iso-config-row__button', {
+      type: 'button',
+      text: 'Start live',
+      title: 'Publish the mixed studio audio to an Icecast-compatible source endpoint.',
+    });
+    this.icecastButton.addEventListener('click', () => this.handleIcecastToggle());
+    this.icecastSettingsButton = createElement('button', 'iso-config-row__button iso-config-row__button--secondary', {
+      type: 'button',
+      text: 'Settings',
+      title: 'Show Icecast publishing settings.',
+      'aria-expanded': 'false',
+    });
+    this.icecastSettingsButton.addEventListener('click', () => this.toggleIcecastSettings());
+    this.icecastStatusNode = createElement('span', 'iso-config-row__status', { text: 'Idle' });
+    this.icecastStatusNode.dataset.state = 'idle';
+    icecastActions.append(this.icecastButton, this.icecastSettingsButton, this.icecastStatusNode);
+    icecastRow.append(icecastActions);
+    isoConfigList.append(icecastRow);
+
+    this.icecastSettingsOpen = false;
+    const icecastPanel = createElement('div', 'iso-config-advanced icecast-config');
+    icecastPanel.hidden = true;
+    this.icecastSettingsPanel = icecastPanel;
+    const icecastBody = createElement('div', 'iso-config-advanced__body icecast-config__body');
+    const createIcecastField = (labelText, input, hintText = '') => {
+      const label = createElement('label', 'icecast-config__field');
+      label.append(createElement('span', 'icecast-config__label', { text: labelText }), input);
+      if (hintText) {
+        label.append(createElement('span', 'icecast-config__hint', { text: hintText }));
+      }
+      return label;
+    };
+    this.icecastTargetInput = createElement('input', 'icecast-config__input', {
+      type: 'url',
+      placeholder: 'https://radio.example.com/radio/8000/',
+      value: icecastSettings.targetUrl || '',
+      autocomplete: 'off',
+      spellcheck: 'false',
+      title: 'Icecast or AzuraCast source ingest URL, not the public listener URL.',
+    });
+    this.icecastUsernameInput = createElement('input', 'icecast-config__input', {
+      type: 'text',
+      placeholder: 'source',
+      value: icecastSettings.username || 'source',
+      autocomplete: 'username',
+      spellcheck: 'false',
+      title: 'Icecast source username.',
+    });
+    this.icecastPasswordInput = createElement('input', 'icecast-config__input', {
+      type: 'password',
+      placeholder: 'Source password',
+      value: icecastSettings.password || '',
+      autocomplete: 'off',
+      autocapitalize: 'none',
+      spellcheck: 'false',
+      title: 'Icecast source password. Stored locally in this browser with the Icecast settings.',
+    });
+    this.icecastMimeSelect = createElement('select', 'icecast-config__input icecast-config__select', {
+      title: 'Audio container sent to Icecast.',
+    });
+    ICECAST_MIME_OPTIONS.forEach((option) => {
+      this.icecastMimeSelect.append(new Option(option.label, option.value));
+    });
+    this.icecastMimeSelect.value = ICECAST_MIME_OPTIONS.some((option) => option.value === icecastSettings.mimeType)
+      ? icecastSettings.mimeType
+      : DEFAULT_ICECAST_MIME_TYPE;
+    this.icecastNameInput = createElement('input', 'icecast-config__input', {
+      type: 'text',
+      placeholder: 'VDO.Ninja Live',
+      value: icecastSettings.name || '',
+      autocomplete: 'off',
+      title: 'Optional stream name shown by Icecast.',
+    });
+    this.icecastGenreInput = createElement('input', 'icecast-config__input', {
+      type: 'text',
+      placeholder: 'Live',
+      value: icecastSettings.genre || '',
+      autocomplete: 'off',
+      title: 'Optional stream genre shown by Icecast.',
+    });
+    const icecastToggles = createElement('div', 'icecast-config__toggles');
+    const publicLabel = createElement('label', 'icecast-config__toggle');
+    this.icecastPublicInput = createElement('input', '', { type: 'checkbox' });
+    this.icecastPublicInput.checked = Boolean(icecastSettings.public);
+    publicLabel.append(this.icecastPublicInput, createElement('span', '', { text: 'Public listing' }));
+    icecastToggles.append(publicLabel);
+
+    icecastBody.append(
+      createIcecastField('Source URL', this.icecastTargetInput, 'Recommended: allow VDO.Ninja in the Icecast/AzuraCast CORS settings for the best direct publishing path.'),
+      createIcecastField('Username', this.icecastUsernameInput),
+      createIcecastField('Password', this.icecastPasswordInput),
+      createIcecastField('Format', this.icecastMimeSelect),
+      createIcecastField('Name', this.icecastNameInput),
+      createIcecastField('Genre', this.icecastGenreInput),
+      icecastToggles,
+    );
+    [
+      this.icecastTargetInput,
+      this.icecastUsernameInput,
+      this.icecastPasswordInput,
+      this.icecastMimeSelect,
+      this.icecastPublicInput,
+      this.icecastNameInput,
+      this.icecastGenreInput,
+    ].forEach((node) => {
+      node.addEventListener('input', () => this.persistIcecastSettingsFromForm());
+      node.addEventListener('change', () => this.persistIcecastSettingsFromForm());
+    });
+    icecastPanel.append(icecastBody);
+    isoConfigList.append(icecastPanel);
 
     // Summary section
     this.isoSummary = createElement('div', 'iso-config-summary');
@@ -4067,6 +4464,9 @@ class PodcastStudioApp {
     this.updateGuestBackupControls();
     this.updateReadinessSummary();
     this.refreshRecordingStatusLive();
+    if (this.icecastPublisher?.isLive()) {
+      this.icecastPublisher.refreshSources();
+    }
   }
 
   createRosterItem(participant) {
@@ -4963,8 +5363,9 @@ class PodcastStudioApp {
     const diskMeta = readDiskRecordingState();
     const diskReady = Boolean(STUDIO_DISK_FEATURE_FLAG && diskMeta.enabled && diskMeta.folderName);
     const guestBackup = this.getGuestBackupSnapshot();
+    const icecastLive = Boolean(this.icecastPublisher?.isLive());
     if (this.isoSummary) {
-      this.isoSummary.style.display = (driveActive || dropboxActive || diskReady) ? '' : 'none';
+      this.isoSummary.style.display = (driveActive || dropboxActive || diskReady || icecastLive) ? '' : 'none';
     }
     this.updateDestinationLights(driveActive, dropboxActive, diskReady, diskMeta, guestBackup);
 
@@ -5013,8 +5414,11 @@ class PodcastStudioApp {
       if (dropboxActive) {
         afterSessionTargets.push('Dropbox');
       }
+      if (icecastLive) {
+        afterSessionTargets.push('Icecast live');
+      }
       this.cloudSummaryNode.textContent = afterSessionTargets.length
-        ? `After-session save: ${afterSessionTargets.join(' • ')}`
+        ? `Outputs: ${afterSessionTargets.join(' • ')}`
         : 'After-session save: Browser buffer only';
       this.cloudSummaryNode.dataset.state = afterSessionTargets.length ? 'ready' : 'pending';
     }
@@ -5490,6 +5894,11 @@ class PodcastStudioApp {
     if (this.abortUploadsController) {
       this.abortUploadsController.abort();
       this.abortUploadsController = null;
+    }
+    if (this.icecastPublisher?.isLive()) {
+      this.icecastPublisher.stop({ quiet: true }).catch((error) => {
+        console.warn('Failed to stop Icecast publisher during dispose', error);
+      });
     }
     if (this.hostMic?.active || this.virtualParticipants.size) {
       this.disableHostMic().catch((error) => {
