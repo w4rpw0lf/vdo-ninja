@@ -21231,10 +21231,10 @@ function getQuickStats(sid = false) {
 function getDetailedState(sid = false) {
 	var streamList = {};
 	var guestFeeds = document.getElementById("guestFeeds");
-	var chunkedBufferDefault = 0;
+	var chunkedBufferDefault = typeof session.defaultChunkedBuffer !== "undefined" ? parseInt(session.defaultChunkedBuffer || 0) : 0;
 	if (session.buffer !== false) {
 		chunkedBufferDefault = parseInt(session.buffer || 0);
-	} else if (session.chunkbuffer !== false) {
+	} else if (session.chunkbuffer !== false && typeof session.chunkbuffer !== "undefined") {
 		chunkedBufferDefault = parseInt(session.chunkbuffer || 0);
 	}
 	var chunkedBufferCeil = session.chunkbufferceil !== false ? parseInt(session.chunkbufferceil || 0) : false;
