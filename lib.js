@@ -27477,61 +27477,64 @@ async function createRoom(roomname = false, reload = false) {
 		}
 		log(roomname);
 
-		passwordRoom = document.getElementById("passwordRoom") ? sanitizePassword(document.getElementById("passwordRoom").value) : "";
+		if (createdViaWizard) {
+			passwordRoom = document.getElementById("passwordRoom") ? sanitizePassword(document.getElementById("passwordRoom").value) : "";
 
-		// Pre-join SSO room setup (optional)
-		try {
-			var ssoBox = getById('useSSOForRoom');
-			if (ssoBox && ssoBox.checked) {
-				// Enable auth mode for this room
-				session.authMode = true;
-				updateURL("auth");
-				// Director should sign in before managing the room
-				// Note: join gating handled by vdoAuth.joinRoom in joinRoom()
-				// Capture desired access mode to apply after join
-				var selected = document.querySelector('input[name="ssoAccessMode"]:checked');
-				var accessMode = (selected && selected.value) ? selected.value : 'public';
-				var allowlist = [];
-				if (accessMode === 'allowlist') {
-					var csv = (getById('preAllowlistCSV') && getById('preAllowlistCSV').value) ? getById('preAllowlistCSV').value : '';
-					if (csv) {
-						allowlist = csv.split(',').map(x => x.trim()).filter(x => x.length > 0);
+			// Pre-join SSO room setup (optional)
+			try {
+				var ssoBox = getById('useSSOForRoom');
+				if (ssoBox && ssoBox.checked) {
+					// Enable auth mode for this room
+					session.authMode = true;
+					updateURL("auth");
+					// Director should sign in before managing the room
+					// Note: join gating handled by vdoAuth.joinRoom in joinRoom()
+					// Capture desired access mode to apply after join
+					var selected = document.querySelector('input[name="ssoAccessMode"]:checked');
+					var accessMode = (selected && selected.value) ? selected.value : 'public';
+					var allowlist = [];
+					if (accessMode === 'allowlist') {
+						var csv = (getById('preAllowlistCSV') && getById('preAllowlistCSV').value) ? getById('preAllowlistCSV').value : '';
+						if (csv) {
+							allowlist = csv.split(',').map(x => x.trim()).filter(x => x.length > 0);
+						}
+					}
+					// Store to apply after join
+					session.pendingRoomSettings = { accessMode: accessMode, allowlist: allowlist };
+					// Persist only when an OAuth redirect is expected.
+					if (!session.authToken && !session.universalToken) {
+						try {
+							sessionStorage.setItem('vdo_pending_room_settings', JSON.stringify(session.pendingRoomSettings));
+							sessionStorage.setItem('vdo_pending_room_settings_recover', '1');
+						} catch(e2){}
+					} else {
+						try {
+							sessionStorage.removeItem('vdo_pending_room_settings');
+							sessionStorage.removeItem('vdo_pending_room_settings_recover');
+						} catch(e2){}
+					}
+					// If guests must sign in (authenticated/allowlist), mark as requireAuth for UX
+					if (accessMode === 'authenticated' || accessMode === 'allowlist') {
+						session.requireAuth = true;
 					}
 				}
-				// Store to apply after join
-				session.pendingRoomSettings = { accessMode: accessMode, allowlist: allowlist };
-				// Persist only when an OAuth redirect is expected.
-				if (!session.authToken && !session.universalToken) {
-					try {
-						sessionStorage.setItem('vdo_pending_room_settings', JSON.stringify(session.pendingRoomSettings));
-						sessionStorage.setItem('vdo_pending_room_settings_recover', '1');
-					} catch(e2){}
-				} else {
-					try {
-						sessionStorage.removeItem('vdo_pending_room_settings');
-						sessionStorage.removeItem('vdo_pending_room_settings_recover');
-					} catch(e2){}
-				}
-				// If guests must sign in (authenticated/allowlist), mark as requireAuth for UX
-				if (accessMode === 'authenticated' || accessMode === 'allowlist') {
-					session.requireAuth = true;
-				}
-				} else if (session.authMode && !session.pendingRoomSettings) {
-					// Recover settings after OAuth redirect (checkbox state lost on reload)
-					try {
-						var shouldRecover = sessionStorage.getItem('vdo_pending_room_settings_recover') === '1';
-						var stored = sessionStorage.getItem('vdo_pending_room_settings');
-						if (shouldRecover && stored) {
-							session.pendingRoomSettings = JSON.parse(stored);
-							if (session.pendingRoomSettings.accessMode === 'authenticated' || session.pendingRoomSettings.accessMode === 'allowlist') {
-								session.requireAuth = true;
-							}
-						}
-						sessionStorage.removeItem('vdo_pending_room_settings');
-						sessionStorage.removeItem('vdo_pending_room_settings_recover');
-					} catch(e2){}
-				}
 			} catch (e) { errorlog(e); }
+		}
+		if (session.authMode && !session.pendingRoomSettings) {
+			// Recover settings after OAuth redirect (checkbox state lost on reload)
+			try {
+				var shouldRecover = sessionStorage.getItem('vdo_pending_room_settings_recover') === '1';
+				var stored = sessionStorage.getItem('vdo_pending_room_settings');
+				if (shouldRecover && stored) {
+					session.pendingRoomSettings = JSON.parse(stored);
+					if (session.pendingRoomSettings.accessMode === 'authenticated' || session.pendingRoomSettings.accessMode === 'allowlist') {
+						session.requireAuth = true;
+					}
+				}
+				sessionStorage.removeItem('vdo_pending_room_settings');
+				sessionStorage.removeItem('vdo_pending_room_settings_recover');
+			} catch(e2){}
+		}
 		}
 
 	var parsedClaimCap = parseInt(session.claimRoomCap);
@@ -27549,9 +27552,11 @@ async function createRoom(roomname = false, reload = false) {
 	}
 	session.requireServerApproval = session.requireServerApproval === true;
 	try {
-		var roomApprovalToggle = getById("requireApprovalForRoom");
-		if (roomApprovalToggle) {
-			session.requireServerApproval = !!roomApprovalToggle.checked;
+		if (createdViaWizard) {
+			var roomApprovalToggle = getById("requireApprovalForRoom");
+			if (roomApprovalToggle) {
+				session.requireServerApproval = !!roomApprovalToggle.checked;
+			}
 		}
 		if (createdViaWizard && session.requireServerApproval && !session.claimBypassKey) {
 			var generatedRoomKey = "";
@@ -28272,6 +28277,12 @@ async function createRoomCallback(passAdd, passAdd2) {
 	}
 
 	session.director = true;
+	try {
+		if (sessionStorage.getItem('vdo_sso_disabled_notice') === '1') {
+			sessionStorage.removeItem('vdo_sso_disabled_notice');
+			warnUser("SSO has been disabled for this director room. New guest links will not include SSO, and previous SSO guest invites may not work with this room.", 6000);
+		}
+	} catch (e) {}
 	session.pendingJoinRequests = [];
 	session.pendingJoinPrompted = new Set([]);
 	updateJoinRequestPanel(false);
@@ -35171,6 +35182,9 @@ function obfuscateURL(input) {
 	input = input.replace("?password=", "?p=");
 	input = input.replace("&password=", "&p=");
 
+	input = input.replace("?roomkey=", "?rk=");
+	input = input.replace("&roomkey=", "&rk=");
+
 	input = input.replace("&maxvideobitrate=", "&mvb=");
 	input = input.replace("?maxvideobitrate=", "?mvb=");
 
@@ -35189,8 +35203,8 @@ function obfuscateURL(input) {
 	input = input.replace("&cleanoutput=", "&clean=");
 	input = input.replace("?cleanoutput=", "?clean=");
 
-	input = input.replace("&maxviewers=", "&clean=");
-	input = input.replace("?maxviewers=", "?clean=");
+	input = input.replace("&maxviewers=", "&mv=");
+	input = input.replace("?maxviewers=", "?mv=");
 
 	input = input.replace("&frameRate=", "&fr=");
 	input = input.replace("?frameRate=", "?fr=");
