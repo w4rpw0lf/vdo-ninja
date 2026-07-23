@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720" viewBox="0 0 1280 720">
+  <!-- Creep Crew cam backdrop: void. Near-black with a faint center lift so
+       faces separate from the background without any visible scenery. -->
+  <defs>
+    <radialGradient id="void" cx="50%" cy="42%" r="72%">
+      <stop offset="0%" stop-color="#0a0f0b"/>
+      <stop offset="60%" stop-color="#050705"/>
+      <stop offset="100%" stop-color="#010201"/>
+    </radialGradient>
+  </defs>
+  <rect width="1280" height="720" fill="url(#void)"/>
+</svg>

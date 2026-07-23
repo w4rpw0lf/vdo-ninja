@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720" viewBox="0 0 1280 720">
+  <!-- Creep Crew cam backdrop: terminal grid. Served same-origin so the
+       VDO.Ninja effects canvas (virtual background, effect 5) never taints. -->
+  <defs>
+    <radialGradient id="vign" cx="50%" cy="45%" r="78%">
+      <stop offset="0%" stop-color="#081509"/>
+      <stop offset="65%" stop-color="#050b06"/>
+      <stop offset="100%" stop-color="#020402"/>
+    </radialGradient>
+    <pattern id="grid" width="64" height="64" patternUnits="userSpaceOnUse">
+      <path d="M64 0H0v64" fill="none" stroke="#16522a" stroke-opacity="0.32" stroke-width="1"/>
+    </pattern>
+    <pattern id="gridMajor" width="256" height="256" patternUnits="userSpaceOnUse">
+      <path d="M256 0H0v256" fill="none" stroke="#1d7038" stroke-opacity="0.22" stroke-width="1.5"/>
+    </pattern>
+  </defs>
+  <rect width="1280" height="720" fill="url(#vign)"/>
+  <rect width="1280" height="720" fill="url(#grid)"/>
+  <rect width="1280" height="720" fill="url(#gridMajor)"/>
+  <g fill="none" stroke="#2a8a45" stroke-opacity="0.35">
+    <path d="M24 40V24h16"/>
+    <path d="M1256 40V24h-16"/>
+    <path d="M24 680v16h16"/>
+    <path d="M1256 680v16h-16"/>
+  </g>
+</svg>
